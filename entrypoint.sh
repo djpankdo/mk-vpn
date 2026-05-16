@@ -1,21 +1,30 @@
 #!/bin/bash
 
-# 1. Ativa o encaminhamento de pacotes (essencial para VPN/Roteamento)
+# 1. Garante que o diretório e o nó do dispositivo TUN existam para a VPN OpenConnect
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200
+    chmod 666 /dev/net/tun
+fi
+
+# 2. Ativa o encaminhamento de pacotes no kernel (essencial para roteamento)
 sysctl -w net.ipv4.ip_forward=1
 
-# 2. Inicia o Microsocks em segundo plano (Porta 1080)
+# 3. Inicia o Microsocks em segundo plano (Porta 1080)
 microsocks -p 1080 &
 
-# 3. Inicia o Squid (Proxy HTTP)
+# 4. Inicia o Squid (Proxy HTTP)
 service squid start
 
-# 4. Inicia o FRR (Roteamento Dinâmico)
-# O FRR precisa que o dono dos arquivos seja o usuário frr
+# 5. Corrige permissões e inicia o FRR (Roteamento Dinâmico)
 chown -R frr:frr /etc/frr
-service frr start
+if [ -f /usr/lib/frr/frrinit.sh ]; then
+    /usr/lib/frr/frrinit.sh start
+else
+    /usr/lib/frr/frr start
+fi
 
 echo "--- Container de Rede Pronto (pankdo/mk-vpn) ---"
 
-# MANTÉM O CONTAINER VIVO: 
-# Executa o Bash de forma interativa para o container não fechar
-exec /bin/bash
+# 6. SOLUÇÃO MIKROTIK: Mantém um processo infinito em primeiro plano sem travar CPU
+tail -f /dev/null
