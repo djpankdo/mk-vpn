@@ -33,4 +33,5 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 WORKDIR /app
 
 # DEFINIR O ENTRYPOINT
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+#ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
