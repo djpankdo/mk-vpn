@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     squid \
     curl \
     vim-tiny \
+    ca-certificates \
+    tini \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
