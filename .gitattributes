@@ -1,0 +1,9 @@
+# O container é Linux: qualquer arquivo que ele executa ou lê PRECISA ficar em
+# LF. Com core.autocrlf=true no Windows, um .sh com CRLF vira
+# "bad interpreter: /bin/bash^M" dentro da imagem.
+* text=auto eol=lf
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.conf      text eol=lf
+*.tmpl      text eol=lf
