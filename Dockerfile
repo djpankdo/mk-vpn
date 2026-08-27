@@ -1,39 +1,53 @@
-# Usando Debian Slim para economizar espaço no flash do MikroTik
-FROM debian:stable-slim
+# mk-vpn — OpenConnect + FRR + proxies para rodar dentro do RouterOS (MikroTik)
+# Alvo: linux/arm64 (RB5009, CCR2004, hAP ax...) com storage externo.
+#
+# Tag fixa em vez de "stable-slim": "stable" muda de release sozinha e quebra
+# o build sem aviso. Suba a tag conscientemente quando quiser.
+FROM debian:trixie-slim
 
-# Evita diálogos durante a instalação
-ENV DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND=noninteractive
 
-# Instalação de todos os pacotes solicitados
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    frr \
-    openconnect \
-    iputils-ping \
-    traceroute \
-    iptables \
-    iproute2 \
-    procps \
-    microsocks \
-    squid \
-    curl \
-    vim-tiny \
-    ca-certificates \
-    tini \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+      openconnect \
+      vpnc-scripts \
+      frr \
+      frr-pythontools \
+      squid \
+      microsocks \
+      iptables \
+      iproute2 \
+      iputils-ping \
+      traceroute \
+      mtr-tiny \
+      tcpdump \
+      dnsutils \
+      openssl \
+      ca-certificates \
+      curl \
+      procps \
+      gettext-base \
+      tini \
+      vim-tiny \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
-# Criar diretórios necessários para os serviços
-RUN mkdir -p /var/run/frr /var/run/sshd
+# Diretórios de runtime. /etc/frr e /etc/squid podem ser sobrescritos por mount
+# do RouterOS; os templates ficam em /etc/mk-vpn e só são aplicados se o destino
+# ainda não tiver configuração própria.
+RUN mkdir -p /run/mk-vpn /run/frr /var/log/mk-vpn \
+ && chown frr:frr /run/frr
 
-# Expor portas comuns (SOCKS5: 1080, Squid: 3128, OpenConnect: 443)
-EXPOSE 1080 3128
+COPY rootfs/ /
 
-# COPIAR O SCRIPT E DAR PERMISSÃO
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+             /usr/local/bin/vpnc-hook.sh \
+             /usr/local/bin/mkvpn-status.sh
 
-WORKDIR /app
+# Informativo apenas: o RouterOS ignora EXPOSE.
+EXPOSE 1080/tcp 3128/tcp 179/tcp
 
-# DEFINIR O ENTRYPOINT
-#ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+STOPSIGNAL SIGTERM
+
+WORKDIR /run/mk-vpn
+
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/entrypoint.sh"]
