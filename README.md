@@ -123,6 +123,7 @@ O OSPF é o único protocolo suportado — não há variável para escolher outr
 | Variável | Default | Descrição |
 |---|---|---|
 | `ENABLE_FRR` | `yes` | |
+| `ANYCAST_IP` | `192.168.192.168/32` | IP de serviço criado na loopback, onde os proxies atendem. É a única rota *connected* redistribuída. |
 | `ROUTER_ID` | automático | Deixe vazio: o FRR escolhe sozinho a partir das interfaces existentes. Fixar um valor amarraria o container a uma rede específica. |
 | `UPLINK_IFACE` | auto | Interface voltada ao MikroTik. Por padrão é detectada como a que carrega a rota default antes de a VPN subir. |
 | `ADVERTISE_DEFAULT` | `no` | `yes` anuncia `0.0.0.0/0` ao MikroTik — cuidado, isso sequestra a saída inteira do roteador. |
@@ -136,6 +137,30 @@ O container roda o OSPF **apenas** na interface voltada ao MikroTik (`passive-in
 default` mais `no passive-interface <veth>`), então ele nunca tenta formar adjacência pelo
 túnel. As rotas do split tunnel entram no zebra como `kernel`, porque quem as instala é o
 `vpnc-script`; daí o `redistribute kernel`.
+
+### O que é anunciado, e o que é barrado
+
+O IP anycast `192.168.192.168/32` é criado na loopback no boot e é onde o Squid e o
+microsocks atendem. Anunciá-lo por OSPF é o que faz os clientes chegarem ao container.
+
+Duas coisas **não** podem vazar para o OSPF, e ambas são filtradas:
+
+- **A rota default.** Se ela fosse redistribuída, o MikroTik aprenderia uma default
+  apontando para o container — que aponta de volta para o MikroTik. `ADVERTISE_DEFAULT=yes`
+  remove essa proteção, deliberadamente.
+- **O IP público do concentrador VPN.** Ao conectar, o `vpnc-script` instala uma rota host
+  para esse endereço via o gateway original. Redistribuída, ela faz o MikroTik acreditar que
+  alcança o concentrador através do container — e o container o alcança através do MikroTik.
+  Loop de roteamento clássico.
+
+Esses endereços não são fixados em lugar nenhum: o container resolve `VPN_SERVER` no boot e
+monta a `prefix-list exclude_VPNGW` com o que encontrar, e ao conectar o hook acrescenta o
+`VPNGATEWAY` que o openconnect realmente usou — cobrindo DNS round-robin entre
+concentradores.
+
+A redistribuição de *connected* é restrita ao anycast pela `prefix-list
+permit_ANYCAST_ONLY`; a sub-rede do veth não é anunciada, já que o MikroTik a tem
+conectada.
 
 ## Configurações são efêmeras
 

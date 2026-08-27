@@ -112,6 +112,18 @@ post_connect() {
             -j TCPMSS --clamp-mss-to-pmtu
     fi
 
+    # O IP com que o openconnect realmente falou pode não ser o que resolvemos
+    # no boot (DNS round-robin entre concentradores). Sem excluí-lo, a rota host
+    # que o vpnc-script acabou de instalar vaza para o OSPF e o MikroTik passa a
+    # rotear o concentrador pelo container — que o alcança pelo MikroTik.
+    if [ -n "${VPNGATEWAY:-}" ] && command -v vtysh >/dev/null 2>&1; then
+        if vtysh -c 'configure terminal'                  -c "ip prefix-list exclude_VPNGW seq 100 deny ${VPNGATEWAY}/32 le 32"                  >/dev/null 2>&1; then
+            log "concentrador $VPNGATEWAY excluído da redistribuição OSPF"
+        else
+            log "AVISO: não consegui excluir $VPNGATEWAY da redistribuição OSPF"
+        fi
+    fi
+
     log "rotas via $DEV:"
     ip route show dev "$DEV" 2>/dev/null | sed 's/^/    /'
     log "tabela de rotas completa:"

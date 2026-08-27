@@ -57,6 +57,7 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${PROXY_ALLOW:=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}"
 
 : "${ENABLE_FRR:=yes}"
+: "${ANYCAST_IP:=192.168.192.168/32}"  # IP de serviço na loopback, anunciado por OSPF
 : "${ROUTER_ID:=}"             # vazio = o FRR escolhe sozinho
 : "${UPLINK_IFACE:=}"          # vazio = interface da rota default (o veth)
 : "${ADVERTISE_DEFAULT:=no}"   # yes = anuncia 0.0.0.0/0 ao MikroTik
@@ -73,9 +74,9 @@ KNOWN_VARS="VPN_SERVER VPN_USER VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_GROUP
 VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_STRICT_CERT VPN_IFACE
 VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_DEBUG DRY_RUN LAN_ROUTES ENABLE_NAT
 ENABLE_MSS_CLAMP ENABLE_SOCKS SOCKS_PORT SOCKS_BIND SOCKS_USER SOCKS_PASS
-ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ROUTER_ID UPLINK_IFACE
-ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD OSPF_MD5_KEY
-OSPF_MD5_KEY_ID"
+ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ANYCAST_IP ROUTER_ID
+UPLINK_IFACE ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD
+OSPF_MD5_KEY OSPF_MD5_KEY_ID"
 
 SECRET_VARS=" VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_2FA VPN_FORM_ENTRIES SOCKS_PASS OSPF_MD5_KEY "
 
@@ -306,17 +307,10 @@ start_socks() {
 #     A política de saída nega 0.0.0.0/0 por padrão: anunciar a default ao
 #     MikroTik sequestraria a saída do roteador inteiro.
 # ---------------------------------------------------------------------------
-prefix_policy() {
-    if is_yes "$ADVERTISE_DEFAULT"; then
-        echo "ip prefix-list MKVPN-OUT seq 10 permit 0.0.0.0/0 le 32"
-    else
-        echo "ip prefix-list MKVPN-OUT seq 5 deny 0.0.0.0/0"
-        echo "ip prefix-list MKVPN-OUT seq 10 permit 0.0.0.0/0 le 32"
-    fi
-}
-
 write_frr_ospf() {
-    local iface="$1" rid="$2" ifextra="" deforig="" ridline=""
+    local iface="$1" rid="$2"
+    local ridline="" ifextra="" excl="" redist_conn="" gw n=10
+
     [ -n "$rid" ] && ridline=" ospf router-id ${rid}"
 
     if [ -n "$OSPF_MD5_KEY" ]; then
@@ -330,12 +324,27 @@ write_frr_ospf() {
  ip ospf hello-interval ${OSPF_HELLO}"
     [ -n "$OSPF_DEAD" ]  && ifextra="${ifextra}
  ip ospf dead-interval ${OSPF_DEAD}"
-    is_yes "$ADVERTISE_DEFAULT" && deforig=" default-information originate"
 
-    # "passive-interface default" + "no passive-interface <veth>" mantém o OSPF
-    # falando só com o MikroTik: nada de tentar adjacência pelo túnel.
-    # As rotas do split tunnel entram no zebra como "kernel" (quem as instala é
-    # o vpnc-script), por isso "redistribute kernel".
+    # Saída das rotas kernel: nega a default (senão o MikroTik aprenderia uma
+    # default apontando para o container, que aponta de volta para ele) e nega
+    # cada IP do concentrador VPN, cuja rota host o vpnc-script instala.
+    if ! is_yes "$ADVERTISE_DEFAULT"; then
+        excl="ip prefix-list exclude_VPNGW seq 5 deny 0.0.0.0/0
+"
+    fi
+    for gw in $(resolve_vpn_gateways); do
+        log "excluindo do OSPF a rota do concentrador: ${gw}/32"
+        excl="${excl}ip prefix-list exclude_VPNGW seq ${n} deny ${gw}/32 le 32
+"
+        n=$((n + 10))
+    done
+    excl="${excl}ip prefix-list exclude_VPNGW seq 500 permit any"
+
+    # Saída das rotas connected: apenas o IP anycast do serviço.
+    if [ -n "$ANYCAST_IP" ]; then
+        redist_conn=" redistribute connected metric-type 1 route-map RMAP_publish_Connected"
+    fi
+
     cat > /etc/frr/frr.conf <<FRREOF
 ! mk-vpn managed — REGERADO A CADA BOOT a partir das variáveis OSPF_*.
 ! Editar este arquivo dentro do container não adianta: ele é sobrescrito.
@@ -349,21 +358,66 @@ interface ${iface}
 !
 router ospf
 ${ridline}
+ ospf send-extra-data zebra
+ maximum-paths 4
  passive-interface default
  no passive-interface ${iface}
- redistribute kernel route-map MKVPN-OUT
- redistribute connected route-map MKVPN-OUT
-${deforig}
+ redistribute kernel metric-type 1 route-map RMAP_publish_Kernel
+${redist_conn}
+exit
 !
-$(prefix_policy)
+ip prefix-list permit_ANYCAST_ONLY seq 10 permit ${ANYCAST_IP} le 32
+ip prefix-list permit_ANYCAST_ONLY seq 500 deny any
 !
-route-map MKVPN-OUT permit 10
- match ip address prefix-list MKVPN-OUT
+${excl}
+!
+route-map RMAP_publish_Connected permit 10
+ match ip address prefix-list permit_ANYCAST_ONLY
+exit
+!
+route-map RMAP_publish_Kernel permit 20
+ match ip address prefix-list exclude_VPNGW
+exit
 !
 line vty
 !
 FRREOF
     sed -i '/^$/d' /etc/frr/frr.conf
+}
+
+# ---------------------------------------------------------------------------
+# 7b. IP anycast do serviço
+#     Os proxies atendem neste /32 da loopback, e é ele — e só ele — que
+#     redistribuímos como rota connected. A sub-rede do veth não precisa ser
+#     anunciada: o MikroTik já a tem conectada.
+# ---------------------------------------------------------------------------
+setup_anycast() {
+    [ -n "$ANYCAST_IP" ] || { log "ANYCAST_IP vazio — nenhum IP de serviço na loopback"; return 0; }
+    if ip addr show dev lo 2>/dev/null | grep -q "${ANYCAST_IP%%/*}"; then
+        log "IP anycast $ANYCAST_IP já presente na loopback"
+        return 0
+    fi
+    if ip addr add "$ANYCAST_IP" dev lo 2>/dev/null; then
+        log "IP anycast $ANYCAST_IP adicionado à loopback"
+    else
+        err "não consegui adicionar $ANYCAST_IP à loopback"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 7c. IPs do concentrador VPN
+#     O vpnc-script instala uma rota host para o IP público do concentrador
+#     apontando para o gateway original. Se ela for redistribuída no OSPF, o
+#     MikroTik passa a achar que alcança o concentrador através do container,
+#     enquanto o container o alcança através do MikroTik: loop de roteamento.
+#     Por isso resolvemos o nome e negamos cada endereço na saída.
+# ---------------------------------------------------------------------------
+resolve_vpn_gateways() {
+    local hp host
+    hp=$(vpn_hostport); host="${hp%:*}"
+    [ -n "$host" ] || return 0
+    getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u
 }
 
 # ---------------------------------------------------------------------------
@@ -561,6 +615,7 @@ log "mk-vpn iniciando ($(openconnect --version 2>&1 | head -1))"
 dump_env
 setup_tun
 setup_forwarding
+setup_anycast
 start_socks
 start_squid
 start_frr
