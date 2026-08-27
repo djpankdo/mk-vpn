@@ -206,6 +206,10 @@ O GitHub Actions (`.github/workflows/build.yml`) builda `linux/arm64` e `linux/a
 publica no Docker Hub a cada push na `main`. Configure os segredos
 `DOCKERHUB_USERNAME` e `DOCKERHUB_TOKEN` no repositório.
 
+Enquanto esses segredos não existirem, o workflow ainda roda e builda as duas
+arquiteturas — serve como teste de compilação — apenas sem publicar. Em pull request ele
+nunca publica.
+
 Build manual:
 
 ```sh
