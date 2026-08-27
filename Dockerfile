@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       procps \
       gettext-base \
-      tini \
       vim-tiny \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
