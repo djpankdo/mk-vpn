@@ -28,8 +28,8 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${VPN_PROTOCOL:=}"          # anyconnect | gp | nc | pulse | f5 | fortinet | array
 : "${VPN_2FA:=}"               # atalho para main:secondary_password=<valor>
 : "${VPN_FORM_ENTRIES:=}"      # "form:campo=valor;form:campo=valor"
-: "${VPN_FINGERPRINT:=}"       # pin-sha256:... (recomendado)
-: "${VPN_INSECURE:=no}"        # yes = descobre e confia no cert apresentado (perigoso)
+: "${VPN_FINGERPRINT:=}"       # pin-sha256:... — opcional, só para travar o valor
+: "${VPN_STRICT_CERT:=no}"     # yes = nunca adotar cert de CA privada automaticamente
 : "${VPN_IFACE:=tun0}"
 : "${VPN_MTU:=}"
 : "${VPN_EXTRA_ARGS:=}"        # argumentos crus repassados ao openconnect
@@ -76,7 +76,7 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${BGP_PEER_AS:=}"
 
 KNOWN_VARS="VPN_SERVER VPN_USER VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_GROUP
-VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_INSECURE VPN_IFACE
+VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_STRICT_CERT VPN_IFACE
 VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_DEBUG DRY_RUN LAN_ROUTES ENABLE_NAT
 ENABLE_MSS_CLAMP ENABLE_SOCKS SOCKS_PORT SOCKS_BIND SOCKS_USER SOCKS_PASS
 ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ROUTING_PROTOCOL ROUTER_ID
@@ -186,9 +186,12 @@ resolve_password() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Fingerprint do servidor
-#    Calculado com openssl (determinístico) em vez de raspar o stderr do
-#    openconnect. Só roda quando VPN_INSECURE=yes.
+# 4. Certificado do servidor
+#     Sondado com SOMENTE openssl. É deliberado não usar o openconnect aqui:
+#     ele falaria o protocolo da VPN e, com um certificado confiável, seguiria
+#     em frente para buscar o formulário de login — uma conversa com o
+#     concentrador que não precisa acontecer, num servidor que bloqueia a conta
+#     após duas falhas de autenticação. O openssl faz o handshake TLS e sai.
 # ---------------------------------------------------------------------------
 vpn_hostport() {
     local s="$VPN_SERVER"
@@ -200,18 +203,34 @@ vpn_hostport() {
     esac
 }
 
+# Preenche PROBE_PIN e PROBE_VERIFY. Retorna 0 se a cadeia valida pelas CAs do
+# sistema, 1 se não valida (CA privada), 2 se nem deu para sondar.
+PROBE_PIN=""
+PROBE_VERIFY=""
 probe_fingerprint() {
-    local hp host port pin
+    local hp host port out pem pin
     hp=$(vpn_hostport); host="${hp%:*}"; port="${hp##*:}"
-    log "sondando $host:$port para calcular o pin do certificado..."
-    pin=$(openssl s_client -connect "$host:$port" -servername "$host" </dev/null 2>/dev/null \
+
+    out=$(openssl s_client -connect "$host:$port" -servername "$host" </dev/null 2>&1)
+    [ -n "$out" ] || return 2
+
+    pem=$(printf '%s\n' "$out" | awk '
+        /-----BEGIN CERTIFICATE-----/ { f = 1 }
+        f { print }
+        /-----END CERTIFICATE-----/   { if (f) exit }')
+    [ -n "$pem" ] || return 2
+
+    pin=$(printf '%s\n' "$pem" \
           | openssl x509 -pubkey -noout 2>/dev/null \
           | openssl pkey -pubin -outform der 2>/dev/null \
           | openssl dgst -sha256 -binary 2>/dev/null \
           | openssl base64 2>/dev/null)
-    if [ -n "$pin" ]; then
-        printf 'pin-sha256:%s' "$pin"
-    fi
+    [ -n "$pin" ] || return 2
+
+    PROBE_PIN="pin-sha256:$pin"
+    PROBE_VERIFY=$(printf '%s\n' "$out" \
+                   | sed -n 's/^ *Verify return code: \([0-9]\{1,\}\).*/\1/p' | tail -1)
+    [ "$PROBE_VERIFY" = "0" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -639,20 +658,37 @@ SERVERCERT=""
 if [ -n "$VPN_FINGERPRINT" ]; then
     SERVERCERT="$VPN_FINGERPRINT"
     log "usando VPN_FINGERPRINT informado: $SERVERCERT"
-elif is_yes "$VPN_INSECURE"; then
-    warn "VPN_INSECURE=yes — vou confiar no certificado que o servidor apresentar AGORA."
-    warn "Isso aceita um man-in-the-middle silenciosamente. Rode uma vez, anote o pin"
-    warn "abaixo em VPN_FINGERPRINT e desligue o VPN_INSECURE."
-    SERVERCERT=$(probe_fingerprint)
-    if [ -n "$SERVERCERT" ]; then
-        log ">>> pin detectado: $SERVERCERT"
-        log ">>> fixe com: VPN_FINGERPRINT=$SERVERCERT"
-    else
-        err "não consegui calcular o pin (servidor inalcançável?); seguindo sem --servercert"
-    fi
 else
-    log "validando o certificado pelas CAs do sistema (defina VPN_FINGERPRINT para"
-    log "servidores com certificado autoassinado, ou VPN_INSECURE=yes para descobri-lo)"
+    log "sondando o certificado de $(vpn_hostport) com openssl (sem falar o"
+    log "protocolo da VPN, portanto sem gastar tentativa de autenticação)..."
+    probe_fingerprint
+    case $? in
+        0)
+            log "a cadeia valida pelas CAs do sistema — não é preciso fixar nada."
+            log "pin observado: $PROBE_PIN"
+            SERVERCERT=""
+            ;;
+        1)
+            if is_yes "$VPN_STRICT_CERT"; then
+                err "a cadeia não valida pelas CAs do sistema (código $PROBE_VERIFY) e"
+                err "VPN_STRICT_CERT=yes. Grave VPN_FINGERPRINT=$PROBE_PIN para seguir."
+                err "abortando antes de contatar o concentrador."
+                cleanup 1
+            fi
+            warn "a cadeia não valida pelas CAs do sistema (código $PROBE_VERIFY):"
+            warn "o servidor usa CA privada. Adotando o certificado apresentado agora."
+            warn "Isso é confiança no primeiro uso — há uma janela para man-in-the-middle."
+            warn "Para fechá-la de vez, grave no envlist:"
+            warn "    VPN_FINGERPRINT=$PROBE_PIN"
+            SERVERCERT="$PROBE_PIN"
+            ;;
+        *)
+            err "não consegui sondar o certificado de $(vpn_hostport) — servidor"
+            err "inalcançável? Seguindo sem --servercert; a validação ficará por"
+            err "conta das CAs do sistema."
+            SERVERCERT=""
+            ;;
+    esac
 fi
 
 build_openconnect_args

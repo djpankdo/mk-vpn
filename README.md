@@ -50,6 +50,28 @@ túnel **não** rouba a rota default do container.
 
 ---
 
+## Certificado do servidor: descoberto sozinho
+
+Você não precisa mexer em `VPN_FINGERPRINT`. No boot, o container sonda o servidor
+**usando apenas `openssl`** e decide:
+
+- **Cadeia valida pelas CAs do sistema** → nada é fixado, a validação segue o caminho
+  normal. O pin observado vai para o log, caso você queira travá-lo.
+- **CA privada** (caso comum em concentrador corporativo) → o container
+  adota o certificado apresentado e registra no log o `VPN_FINGERPRINT` correspondente.
+
+A sonda é feita com `openssl` de propósito, e não com o próprio `openconnect`: o openconnect
+falaria o protocolo da VPN e, com um certificado confiável, seguiria adiante para buscar o
+formulário de login. Num concentrador que bloqueia a conta após duas falhas, essa é uma
+conversa que não vale a pena ter. O `openssl` faz o handshake TLS e vai embora.
+
+A adoção automática é confiança no primeiro uso: existe uma janela para um
+man-in-the-middle no primeiro contato. Para fechá-la, copie do log o
+`VPN_FINGERPRINT=pin-sha256:...` e grave no envlist — a partir daí o valor é conferido a
+cada conexão. Com `VPN_STRICT_CERT=yes` o container recusa conectar até que você faça isso.
+
+---
+
 ## Variáveis de ambiente
 
 ### VPN
@@ -65,8 +87,8 @@ túnel **não** rouba a rota default do container.
 | `VPN_PROTOCOL` | auto | `anyconnect`, `gp`, `nc`, `pulse`, `f5`, `fortinet`, `array`. |
 | `VPN_2FA` | — | Atalho para `--form-entry main:secondary_password=<valor>` (ex.: `push`, ou o token). |
 | `VPN_FORM_ENTRIES` | — | Vários form-entries separados por `;`, ex.: `main:secondary_password=push;main:group_list=TI`. |
-| `VPN_FINGERPRINT` | — | `pin-sha256:...` do certificado do servidor. |
-| `VPN_INSECURE` | `no` | `yes` = descobre o pin sozinho e confia nele. Aceita MITM — use só para descobrir o valor, depois fixe em `VPN_FINGERPRINT`. |
+| `VPN_FINGERPRINT` | automático | `pin-sha256:...` do certificado. **Não precisa preencher** — veja abaixo. Informe apenas se quiser travar o valor. |
+| `VPN_STRICT_CERT` | `no` | `yes` faz o container abortar, em vez de adotar automaticamente, quando o servidor usa CA privada. |
 | `VPN_IFACE` | `tun0` | Nome da interface do túnel. |
 | `VPN_MTU` | auto | `--mtu`. |
 | `VPN_EXTRA_ARGS` | — | Argumentos crus repassados ao `openconnect`. |
@@ -155,7 +177,6 @@ Ajuste `disk1` para o nome do seu storage e `172.19.0.0/24` para a rede que pref
 /container/envs/add name=vpn key=VPN_USER     value="seu.usuario"
 /container/envs/add name=vpn key=VPN_PASS_B64 value="c3VhLXNlbmhh"
 /container/envs/add name=vpn key=VPN_GROUP    value="SEU-GRUPO"
-/container/envs/add name=vpn key=VPN_FINGERPRINT  value="pin-sha256:..."
 /container/envs/add name=vpn key=ROUTING_PROTOCOL value="ospf"
 
 # na primeira vez, valide sem gastar tentativa de autenticação:
