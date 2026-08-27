@@ -88,12 +88,20 @@ is_yes() { case "${1,,}" in yes|y|true|1|on) return 0 ;; *) return 1 ;; esac; }
 # ---------------------------------------------------------------------------
 dump_env() {
     log "================ mk-vpn: ambiente recebido ================"
+    # Em DRY_RUN os segredos aparecem em claro de propósito: é assim que se
+    # confere se o base64 da senha foi decodificado como deveria. Fora do dry
+    # run eles continuam mascarados.
+    local reveal=no
+    if is_yes "$DRY_RUN"; then
+        reveal=yes
+        log "DRY_RUN: segredos exibidos em CLARO abaixo"
+    fi
     local v val
     for v in $KNOWN_VARS; do
         val="${!v}"
         if [ -z "$val" ]; then
             printf '    %-22s (vazio)\n' "$v"
-        elif [[ "$SECRET_VARS" == *" $v "* ]]; then
+        elif [[ "$SECRET_VARS" == *" $v "* ]] && [ "$reveal" = no ]; then
             printf '    %-22s <definido: %d caracteres>\n' "$v" "${#val}"
         else
             printf '    %-22s %s\n' "$v" "$val"
@@ -167,7 +175,8 @@ resolve_password() {
             err "VPN_PASS_B64 não é base64 válido"
             return 1
         fi
-        # Um base64 gerado com "echo" carrega \n no fim; é o erro mais comum aqui.
+        # A substituição de comando já descarta quebras de linha finais; esta linha é
+        # defensiva. Um espaço no fim, porém, sobrevive — e o hexdump do DRY_RUN o mostra.
         REAL_PASS=${REAL_PASS%$'\n'}
         log "senha decodificada de VPN_PASS_B64 (${#REAL_PASS} caracteres)"
     elif [ -n "$VPN_PASS" ]; then
@@ -565,10 +574,14 @@ run_vpn() {
     if is_yes "$DRY_RUN"; then
         log "===================== DRY RUN ====================="
         log "DRY_RUN=yes — o openconnect NÃO será executado e nenhuma tentativa"
-        log "de autenticação será gasta. Comando que seria executado (a senha vai"
-        log "por stdin, por isso não aparece na linha de comando):"
+        log "de autenticação será gasta. Comando exato, com a senha já decodificada:"
         log ""
-        log "    printf '%s\n' \"\$SENHA\" | openconnect ${OC_ARGS[*]}"
+        log "    printf '%s\n' '${REAL_PASS}' | openconnect ${OC_ARGS[*]}"
+        log ""
+        # O hexdump revela \n, \r ou espaco no fim que o base64
+        # possa ter trazido e que a olho nu passariam despercebidos.
+        log "senha decodificada: [${REAL_PASS}]  (${#REAL_PASS} caracteres)"
+        log "bytes da senha    : $(printf '%s' "$REAL_PASS" | od -An -tx1 | tr -s ' ' | tr -d '\n')"
         log ""
         log "O container fica de pé para inspeção (rode mkvpn-status.sh)."
         log "Pare com /container/stop e remova DRY_RUN para conectar de verdade."
