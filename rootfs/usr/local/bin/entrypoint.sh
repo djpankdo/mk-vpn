@@ -247,6 +247,24 @@ supervise() {
     log "supervisor de $name: pid $!"
 }
 
+# Um /29 dentro de um /16 já listado faz o Squid descartar a ACL e emitir três
+# linhas de aviso a cada boot. Este teste evita o duplicado.
+ip2int() {
+    local IFS=. a b c d
+    read -r a b c d <<< "$1"
+    printf '%s' "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
+}
+
+cidr_covers() {   # $1 contém $2 ?
+    local oip="${1%%/*}" olen="${1##*/}" iip="${2%%/*}" ilen="${2##*/}" mask
+    case "$olen" in ''|*[!0-9]*) return 1 ;; esac
+    case "$ilen" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ilen" -ge "$olen" ] || return 1
+    if [ "$olen" -eq 0 ]; then return 0; fi
+    mask=$(( 0xFFFFFFFF << (32 - olen) & 0xFFFFFFFF ))
+    [ $(( $(ip2int "$oip") & mask )) -eq $(( $(ip2int "$iip") & mask )) ]
+}
+
 # ---------------------------------------------------------------------------
 # 6. Squid — sem squid.conf próprio, o default upstream é
 #    "allow localhost; deny all", ou seja, nega toda a LAN.
@@ -258,9 +276,14 @@ start_squid() {
     # redes diferentes, então nada aqui pode ficar preso a um IP da rede
     # anterior — e o root-dir do RouterOS persiste entre reinícios.
     local nets="$PROXY_ALLOW"
-    local n
+    local n outer
     for n in $(ip -4 route show scope link proto kernel 2>/dev/null | awk '{print $1}'); do
-        case " $nets " in *" $n "*) ;; *) nets="$nets $n" ;; esac
+        # O Squid ignora (e reclama de) uma ACL contida em outra já listada,
+        # então só acrescenta a sub-rede se ela ainda não estiver coberta.
+        for outer in $nets; do
+            cidr_covers "$outer" "$n" && continue 2
+        done
+        nets="$nets $n"
     done
 
     {
@@ -360,8 +383,6 @@ router ospf
 ${ridline}
  ospf send-extra-data zebra
  maximum-paths 4
- passive-interface default
- no passive-interface ${iface}
  redistribute kernel metric-type 1 route-map RMAP_publish_Kernel
 ${redist_conn}
 exit
@@ -450,10 +471,15 @@ start_frr() {
         iface=$(ip -o link show 2>/dev/null | awk -F': ' '$2 != "lo" {print $2}' | head -1)
     fi
 
-    # Router-ID fica vazio de propósito quando ROUTER_ID não é informado: o FRR
-    # escolhe sozinho a partir das interfaces existentes. Fixar um valor
-    # amarraria o container a uma rede específica, e ele roda em várias.
+    # Router-ID: descoberto do IP do veth, não informado por variável. Deixar o
+    # FRR escolher sozinho não serve aqui — ele pega o maior endereço das
+    # interfaces, que é justamente o IP anycast; com mais de um container no
+    # mesmo domínio OSPF, todos ficariam com o mesmo router-id e as LSAs
+    # conflitariam. O IP do veth é único por instância e igualmente dinâmico.
     rid="$ROUTER_ID"
+    if [ -z "$rid" ] && [ -n "$iface" ]; then
+        rid=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null               | awk '{print $4}' | cut -d/ -f1 | head -1)
+    fi
 
     # Configuração efêmera: regerada a todo boot, nunca reaproveitada do
     # root-dir persistente do RouterOS.

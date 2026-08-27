@@ -124,7 +124,7 @@ O OSPF é o único protocolo suportado — não há variável para escolher outr
 |---|---|---|
 | `ENABLE_FRR` | `yes` | |
 | `ANYCAST_IP` | `192.168.192.168/32` | IP de serviço criado na loopback, onde os proxies atendem. É a única rota *connected* redistribuída. |
-| `ROUTER_ID` | automático | Deixe vazio: o FRR escolhe sozinho a partir das interfaces existentes. Fixar um valor amarraria o container a uma rede específica. |
+| `ROUTER_ID` | IP do veth | Descoberto sozinho. Não é deixado a cargo do FRR de propósito: ele escolheria o maior endereço das interfaces, que é o IP anycast — e aí dois containers no mesmo domínio OSPF teriam router-id idêntico. |
 | `UPLINK_IFACE` | auto | Interface voltada ao MikroTik. Por padrão é detectada como a que carrega a rota default antes de a VPN subir. |
 | `ADVERTISE_DEFAULT` | `no` | `yes` anuncia `0.0.0.0/0` ao MikroTik — cuidado, isso sequestra a saída inteira do roteador. |
 | `OSPF_AREA` | `0.0.0.0` | |
@@ -133,9 +133,10 @@ O OSPF é o único protocolo suportado — não há variável para escolher outr
 | `OSPF_MD5_KEY` | — | Se definido, ativa autenticação `message-digest`. |
 | `OSPF_MD5_KEY_ID` | `1` | ID da chave MD5. |
 
-O container roda o OSPF **apenas** na interface voltada ao MikroTik (`passive-interface
-default` mais `no passive-interface <veth>`), então ele nunca tenta formar adjacência pelo
-túnel. As rotas do split tunnel entram no zebra como `kernel`, porque quem as instala é o
+O container roda o OSPF **apenas** na interface voltada ao MikroTik: só ela recebe
+`ip ospf area`, e no FRR isso já basta para nenhuma outra interface participar — o túnel
+nunca vira candidato a adjacência. (`passive-interface default` seria redundante aqui, e
+está deprecado por não ser VRF-aware.) As rotas do split tunnel entram no zebra como `kernel`, porque quem as instala é o
 `vpnc-script`; daí o `redistribute kernel`.
 
 ### O que é anunciado, e o que é barrado
