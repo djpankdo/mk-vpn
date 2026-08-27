@@ -124,10 +124,17 @@ post_connect() {
         fi
     fi
 
-    log "rotas via $DEV:"
-    ip route show dev "$DEV" 2>/dev/null | sed 's/^/    /'
-    log "tabela de rotas completa:"
-    ip route show 2>/dev/null | sed 's/^/    /'
+    # Resumo, nunca a tabela inteira: um split tunnel corporativo traz centenas
+    # de prefixos, e despeja-los aqui enche o buffer de log do RouterOS e expulsa
+    # todo o resto -- inclusive as linhas acima, que sao as que interessam.
+    local n_tun n_total
+    n_tun=$(ip route show dev "$DEV" 2>/dev/null | grep -c .)
+    n_total=$(ip route show 2>/dev/null | grep -c .)
+    log "rotas instaladas: $n_tun via $DEV, $n_total no total"
+    log "amostra: $(ip route show dev "$DEV" 2>/dev/null | head -3 | awk '{printf "%s ", $1}')"
+    log "default: $(ip route show default 2>/dev/null | head -1)"
+    log "NAT: $(iptables -t nat -S POSTROUTING 2>/dev/null | grep -c MASQUERADE) regra(s) MASQUERADE; MSS: $(iptables -t mangle -S 2>/dev/null | grep -c TCPMSS) regra(s) TCPMSS"
+    log "para a tabela completa use: /container/shell -> mkvpn-status.sh"
 }
 
 post_disconnect() {
