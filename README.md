@@ -7,6 +7,18 @@ para devolver ao roteador as rotas aprendidas ao conectar o túnel.
 Alvo: RouterOS v7, arquitetura **arm64**, com o container em storage externo
 (NVMe/USB/NAND).
 
+> ## ⚠️ Sem reconexão automática — e por quê
+>
+> O concentrador **bloqueia a conta após duas falhas de autenticação**. Por isso o
+> container **nunca** tenta reconectar sozinho: quando o openconnect termina, por qualquer
+> motivo, tudo é encerrado e o container sai. Quem decide tentar de novo é você, iniciando
+> o container.
+>
+> Antes de mexer em qualquer coisa que afete a linha de comando do openconnect, use
+> `DRY_RUN=yes`: o container faz o boot inteiro — TUN, encaminhamento, proxies, FRR,
+> decodificação da senha — e apenas **registra no log o comando que seria executado**, sem
+> gastar tentativa de autenticação.
+
 ---
 
 ## Arquitetura
@@ -59,13 +71,14 @@ túnel **não** rouba a rota default do container.
 | `VPN_MTU` | auto | `--mtu`. |
 | `VPN_EXTRA_ARGS` | — | Argumentos crus repassados ao `openconnect`. |
 | `VPN_DEFAULT_ROUTE` | `no` | `yes` = o túnel fica com a rota default do container (full tunnel). Exige `LAN_ROUTES`. |
-| `VPN_RETRY_DELAY` | `15` | Segundos entre tentativas de reconexão. |
+| `VPN_DEBUG` | `no` | `yes` acrescenta `--dump-http-traffic`. **Cuidado:** isso despeja o tráfego HTTP da autenticação no log do RouterOS, credenciais inclusive. |
+| `DRY_RUN` | `no` | `yes` faz todo o boot mas **não** executa o openconnect: apenas registra no log o comando que seria executado, e mantém o container de pé para inspeção. |
 
 ### Roteamento
 
 | Variável | Default | Descrição |
 |---|---|---|
-| `LAN_ROUTES` | — | Prefixos que devem voltar pelo gateway do MikroTik, separados por espaço (ex.: `192.168.88.0/24 10.20.0.0/16`). Obrigatório quando `VPN_DEFAULT_ROUTE=yes`. |
+| `LAN_ROUTES` | — | Só é necessário com `VPN_DEFAULT_ROUTE=yes`. No modo padrão a rota default do container continua apontando para o MikroTik, e o retorno da LAN funciona por ela — sem precisar listar prefixo nenhum. |
 | `ENABLE_NAT` | `yes` | `MASQUERADE` na saída do túnel. |
 | `ENABLE_MSS_CLAMP` | `yes` | Clamp de MSS ao PMTU. Desligar isso é o caminho mais rápido para "ping funciona, HTTPS trava". |
 
@@ -79,7 +92,7 @@ túnel **não** rouba a rota default do container.
 | `SOCKS_USER` / `SOCKS_PASS` | — | Autenticação do microsocks. Sem elas o proxy é aberto. |
 | `ENABLE_SQUID` | `yes` | |
 | `SQUID_PORT` | `3128` | |
-| `PROXY_ALLOW` | `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16` | Redes autorizadas no Squid. |
+| `PROXY_ALLOW` | `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16` | Redes autorizadas no Squid. As sub-redes conectadas do próprio container são acrescentadas automaticamente, então normalmente não há o que ajustar ao mudar de rede. |
 
 ### Roteamento dinâmico (FRR)
 
@@ -87,7 +100,7 @@ túnel **não** rouba a rota default do container.
 |---|---|---|
 | `ENABLE_FRR` | `yes` | |
 | `ROUTING_PROTOCOL` | `ospf` | `ospf`, `bgp` ou `none`. |
-| `ROUTER_ID` | IP do veth | Router-ID usado pelo protocolo escolhido. |
+| `ROUTER_ID` | automático | Deixe vazio: o FRR escolhe sozinho a partir das interfaces existentes. Fixar um valor amarraria o container a uma rede específica. |
 | `UPLINK_IFACE` | auto | Interface voltada ao MikroTik. Por padrão é detectada como a que carrega a rota default antes de a VPN subir. |
 | `ADVERTISE_DEFAULT` | `no` | `yes` anuncia `0.0.0.0/0` ao MikroTik — cuidado, isso sequestra a saída inteira do roteador. |
 | `OSPF_AREA` | `0.0.0.0` | |
@@ -102,8 +115,13 @@ default` mais `no passive-interface <veth>`), então ele nunca tenta formar adja
 túnel. As rotas do split tunnel entram no zebra como `kernel`, porque quem as instala é o
 `vpnc-script`; daí o `redistribute kernel`.
 
-Se você montar seu próprio `/etc/frr/frr.conf` ou `/etc/squid/squid.conf`, o container
-detecta e não sobrescreve.
+## Configurações são efêmeras
+
+O `frr.conf` e o `squid.conf` são **regerados a cada boot** a partir das variáveis de
+ambiente e do estado observado da rede. Isso é proposital: a mesma imagem roda em redes
+diferentes, e nada pode ficar preso ao endereçamento da rede anterior — ainda mais porque
+o `root-dir` do container persiste no storage entre reinícios. Editar esses arquivos por
+dentro do container não adianta, eles são sobrescritos.
 
 ---
 
@@ -137,22 +155,21 @@ Ajuste `disk1` para o nome do seu storage e `172.19.0.0/24` para a rede que pref
 /container/envs/add name=vpn key=VPN_USER     value="seu.usuario"
 /container/envs/add name=vpn key=VPN_PASS_B64 value="c3VhLXNlbmhh"
 /container/envs/add name=vpn key=VPN_GROUP    value="SEU-GRUPO"
-/container/envs/add name=vpn key=LAN_ROUTES   value="192.168.88.0/24"
-/container/envs/add name=vpn key=PROXY_ALLOW  value="192.168.88.0/24"
+/container/envs/add name=vpn key=VPN_FINGERPRINT  value="pin-sha256:..."
 /container/envs/add name=vpn key=ROUTING_PROTOCOL value="ospf"
-/container/envs/add name=vpn key=OSPF_AREA        value="0.0.0.0"
+
+# na primeira vez, valide sem gastar tentativa de autenticação:
+/container/envs/add name=vpn key=DRY_RUN value="yes"
 ```
 
 > **Senha:** gere o base64 **sem** quebra de linha —
 > `printf '%s' 'minha-senha' | base64`. Um `echo` comum acrescenta `\n` e a
 > autenticação falha com uma mensagem genérica.
 
-### 3. Mounts (opcionais, mas recomendados)
+### 3. Mounts
 
-```routeros
-/container/mounts/add name=mkvpn-frr   src=disk1/mk-vpn/frr   dst=/etc/frr
-/container/mounts/add name=mkvpn-squid src=disk1/mk-vpn/squid dst=/etc/squid
-```
+Nenhum é necessário. As configurações do FRR e do Squid são geradas no boot, e um mount
+sobre `/etc/frr` ou `/etc/squid` seria sobrescrito.
 
 ### 4. O container
 
@@ -160,7 +177,6 @@ Ajuste `disk1` para o nome do seu storage e `172.19.0.0/24` para a rede que pref
 /container/add remote-image=SEUUSUARIO/mk-vpn:latest \
     interface=veth-vpn \
     envlist=vpn \
-    mounts=mkvpn-frr,mkvpn-squid \
     root-dir=disk1/mk-vpn/root \
     logging=yes \
     start-on-boot=yes

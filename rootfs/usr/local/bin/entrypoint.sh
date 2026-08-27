@@ -34,7 +34,13 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${VPN_MTU:=}"
 : "${VPN_EXTRA_ARGS:=}"        # argumentos crus repassados ao openconnect
 : "${VPN_DEFAULT_ROUTE:=no}"   # yes = túnel captura a rota default do container
-: "${VPN_RETRY_DELAY:=15}"     # segundos entre tentativas de reconexão
+: "${VPN_DEBUG:=no}"           # yes = --dump-http-traffic (CUIDADO: loga credenciais)
+
+# O concentrador BLOQUEIA a conta após duas falhas de autenticação. Por isso não
+# existe reconexão automática aqui, e por isso existe o DRY_RUN: ele faz o boot
+# inteiro e só registra no log o comando que seria executado, sem gastar uma
+# tentativa. Use-o sempre que mexer em algo que afete a linha do openconnect.
+: "${DRY_RUN:=no}"
 
 : "${LAN_ROUTES:=}"            # prefixos que devem voltar pelo gateway do MikroTik
 : "${ENABLE_NAT:=yes}"         # MASQUERADE na saída do túnel
@@ -71,7 +77,7 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 
 KNOWN_VARS="VPN_SERVER VPN_USER VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_GROUP
 VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_INSECURE VPN_IFACE
-VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_RETRY_DELAY LAN_ROUTES ENABLE_NAT
+VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_DEBUG DRY_RUN LAN_ROUTES ENABLE_NAT
 ENABLE_MSS_CLAMP ENABLE_SOCKS SOCKS_PORT SOCKS_BIND SOCKS_USER SOCKS_PASS
 ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ROUTING_PROTOCOL ROUTER_ID
 UPLINK_IFACE ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD
@@ -228,41 +234,30 @@ supervise() {
 }
 
 # ---------------------------------------------------------------------------
-# 5b. Configuração veio de mount?
-#     Detectar por conteúdo não serve: os pacotes squid e frr do Debian já
-#     trazem seus próprios arquivos, e o container concluiria que são do
-#     usuário — subindo o Squid com "deny all" e o FRR sem roteamento. Um mount
-#     do RouterOS, por outro lado, aparece sempre em /proc/self/mounts.
-# ---------------------------------------------------------------------------
-config_from_mount() {
-    local path
-    for path in "$@"; do
-        awk -v p="$path" '$2 == p { found = 1 } END { exit !found }'             /proc/self/mounts 2>/dev/null && return 0
-    done
-    return 1
-}
-
-# ---------------------------------------------------------------------------
 # 6. Squid — sem squid.conf próprio, o default upstream é
 #    "allow localhost; deny all", ou seja, nega toda a LAN.
 # ---------------------------------------------------------------------------
 start_squid() {
     is_yes "$ENABLE_SQUID" || { log "Squid desabilitado (ENABLE_SQUID=$ENABLE_SQUID)"; return 0; }
 
-    if config_from_mount /etc/squid /etc/squid/squid.conf; then
-        log "usando /etc/squid/squid.conf fornecido por mount"
-    else
-        {
-            echo "# mk-vpn managed — gerado a partir de PROXY_ALLOW/SQUID_PORT."
-            echo "# Monte seu próprio /etc/squid/squid.conf para substituir."
-            for net in $PROXY_ALLOW; do
-                echo "acl mkvpn_clients src $net"
-            done
-            cat /etc/mk-vpn/squid.conf.tmpl
-            echo "http_port $SQUID_PORT"
-        } > /etc/squid/squid.conf
-        log "squid.conf gerado (porta $SQUID_PORT, redes permitidas: $PROXY_ALLOW)"
-    fi
+    # Configuração efêmera: regerada a todo boot. O mesmo container roda em
+    # redes diferentes, então nada aqui pode ficar preso a um IP da rede
+    # anterior — e o root-dir do RouterOS persiste entre reinícios.
+    local nets="$PROXY_ALLOW"
+    local n
+    for n in $(ip -4 route show scope link proto kernel 2>/dev/null | awk '{print $1}'); do
+        case " $nets " in *" $n "*) ;; *) nets="$nets $n" ;; esac
+    done
+
+    {
+        echo "# mk-vpn managed — regerado a cada boot; não edite dentro do container."
+        for net in $nets; do
+            echo "acl mkvpn_clients src $net"
+        done
+        cat /etc/mk-vpn/squid.conf.tmpl
+        echo "http_port $SQUID_PORT"
+    } > /etc/squid/squid.conf
+    log "squid.conf gerado (porta $SQUID_PORT, redes permitidas:$(printf ' %s' $nets))"
 
     if ! squid -k parse -f /etc/squid/squid.conf >/dev/null 2>&1; then
         err "squid.conf inválido:"
@@ -308,7 +303,8 @@ prefix_policy() {
 }
 
 write_frr_ospf() {
-    local iface="$1" rid="$2" ifextra="" deforig=""
+    local iface="$1" rid="$2" ifextra="" deforig="" ridline=""
+    [ -n "$rid" ] && ridline=" ospf router-id ${rid}"
 
     if [ -n "$OSPF_MD5_KEY" ]; then
         ifextra="${ifextra}
@@ -328,8 +324,8 @@ write_frr_ospf() {
     # As rotas do split tunnel entram no zebra como "kernel" (quem as instala é
     # o vpnc-script), por isso "redistribute kernel".
     cat > /etc/frr/frr.conf <<FRREOF
-! mk-vpn managed — gerado a partir das variáveis OSPF_*/ROUTER_ID.
-! Monte seu próprio /etc/frr/frr.conf para substituir este arquivo.
+! mk-vpn managed — REGERADO A CADA BOOT a partir das variáveis OSPF_*.
+! Editar este arquivo dentro do container não adianta: ele é sobrescrito.
 frr defaults traditional
 hostname mk-vpn
 log stdout informational
@@ -339,7 +335,7 @@ interface ${iface}
  ip ospf area ${OSPF_AREA}${ifextra}
 !
 router ospf
- ospf router-id ${rid}
+${ridline}
  passive-interface default
  no passive-interface ${iface}
  redistribute kernel route-map MKVPN-OUT
@@ -354,22 +350,24 @@ route-map MKVPN-OUT permit 10
 line vty
 !
 FRREOF
+    sed -i '/^$/d' /etc/frr/frr.conf
 }
 
 write_frr_bgp() {
-    local rid="$1"
+    local rid="$1" ridline=""
+    [ -n "$rid" ] && ridline=" bgp router-id ${rid}"
 
     # "no bgp ebgp-requires-policy": sem isso o FRR 8+ não anuncia nada em eBGP.
     cat > /etc/frr/frr.conf <<FRREOF
-! mk-vpn managed — gerado a partir das variáveis BGP_*/ROUTER_ID.
-! Monte seu próprio /etc/frr/frr.conf para substituir este arquivo.
+! mk-vpn managed — REGERADO A CADA BOOT a partir das variáveis BGP_*.
+! Editar este arquivo dentro do container não adianta: ele é sobrescrito.
 frr defaults traditional
 hostname mk-vpn
 log stdout informational
 service integrated-vtysh-config
 !
 router bgp ${BGP_AS}
- bgp router-id ${rid}
+${ridline}
  no bgp ebgp-requires-policy
  neighbor ${BGP_PEER} remote-as ${BGP_PEER_AS}
  neighbor ${BGP_PEER} description mikrotik
@@ -390,6 +388,7 @@ route-map MKVPN-OUT permit 10
 line vty
 !
 FRREOF
+    sed -i '/^$/d' /etc/frr/frr.conf
 }
 
 # ---------------------------------------------------------------------------
@@ -412,54 +411,61 @@ start_frr() {
     iface="$UPLINK_IFACE"
     if [ -z "$iface" ]; then
         # A interface do veth é a que carrega a rota default antes de a VPN
-        # subir — é por ela que falamos com o MikroTik.
-        iface=$(ip route show default 2>/dev/null                 | awk '{for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+        # subir — é por ela que falamos com o MikroTik. Detectar pela rota, e
+        # não por IP, mantém isto válido em qualquer rede.
+        iface=$(ip route show default 2>/dev/null \
+                | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' \
+                | head -1)
     fi
-    [ -n "$iface" ] || iface=$(ip -o link show 2>/dev/null                                | awk -F': ' '$2!="lo"{print $2}' | head -1)
+    if [ -z "$iface" ]; then
+        iface=$(ip -o link show 2>/dev/null | awk -F': ' '$2 != "lo" {print $2}' | head -1)
+    fi
 
+    # Router-ID fica vazio de propósito quando ROUTER_ID não é informado: o FRR
+    # escolhe sozinho a partir das interfaces existentes. Fixar um valor
+    # amarraria o container a uma rede específica, e ele roda em várias.
     rid="$ROUTER_ID"
-    if [ -z "$rid" ]; then
-        rid=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null               | awk '{print $4}' | cut -d/ -f1 | head -1)
-    fi
-    [ -n "$rid" ] || rid="0.0.0.1"
 
-    if config_from_mount /etc/frr /etc/frr/frr.conf; then
-        log "usando /etc/frr/frr.conf fornecido por mount"
-    else
-        case "${ROUTING_PROTOCOL,,}" in
-            ospf)
-                write_frr_ospf "$iface" "$rid"
-                log "frr.conf gerado: OSPF area $OSPF_AREA em $iface, router-id $rid"
-                ;;
-            bgp)
-                if [ -z "$BGP_AS" ] || [ -z "$BGP_PEER" ] || [ -z "$BGP_PEER_AS" ]; then
-                    warn "ROUTING_PROTOCOL=bgp mas BGP_AS/BGP_PEER/BGP_PEER_AS não foram"
-                    warn "definidos. O FRR sobe só com o zebra e não anuncia nada."
-                    : > /etc/frr/frr.conf
-                else
-                    write_frr_bgp "$rid"
-                    log "frr.conf gerado: BGP AS $BGP_AS, peer $BGP_PEER (AS $BGP_PEER_AS), router-id $rid"
-                fi
-                ;;
-            none)
-                log "ROUTING_PROTOCOL=none — o FRR sobe só com o zebra"
-                : > /etc/frr/frr.conf
-                ;;
-            *)
-                err "ROUTING_PROTOCOL='$ROUTING_PROTOCOL' inválido (use ospf, bgp ou none)"
-                : > /etc/frr/frr.conf
-                ;;
-        esac
-    fi
-
-    # Habilita no /etc/frr/daemons apenas o daemon do protocolo em uso: deixar
-    # o outro ligado só gera ruído de log e um processo à toa.
-    sed -i 's/^zebra=.*/zebra=yes/;s/^ospfd=.*/ospfd=no/;s/^bgpd=.*/bgpd=no/'         /etc/frr/daemons 2>/dev/null
+    # Configuração efêmera: regerada a todo boot, nunca reaproveitada do
+    # root-dir persistente do RouterOS.
     case "${ROUTING_PROTOCOL,,}" in
-        ospf) sed -i 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons 2>/dev/null
-              grep -q '^ospfd=yes' /etc/frr/daemons 2>/dev/null || echo 'ospfd=yes' >> /etc/frr/daemons ;;
-        bgp)  sed -i 's/^bgpd=.*/bgpd=yes/'  /etc/frr/daemons 2>/dev/null
-              grep -q '^bgpd=yes'  /etc/frr/daemons 2>/dev/null || echo 'bgpd=yes'  >> /etc/frr/daemons ;;
+        ospf)
+            write_frr_ospf "$iface" "$rid"
+            log "frr.conf gerado: OSPF área $OSPF_AREA em $iface, router-id ${rid:-automático}"
+            ;;
+        bgp)
+            if [ -z "$BGP_AS" ] || [ -z "$BGP_PEER" ] || [ -z "$BGP_PEER_AS" ]; then
+                warn "ROUTING_PROTOCOL=bgp mas BGP_AS/BGP_PEER/BGP_PEER_AS não foram"
+                warn "definidos. O FRR sobe só com o zebra e não anuncia nada."
+                : > /etc/frr/frr.conf
+            else
+                write_frr_bgp "$rid"
+                log "frr.conf gerado: BGP AS $BGP_AS, peer $BGP_PEER (AS $BGP_PEER_AS), router-id ${rid:-automático}"
+            fi
+            ;;
+        none)
+            log "ROUTING_PROTOCOL=none — o FRR sobe só com o zebra"
+            : > /etc/frr/frr.conf
+            ;;
+        *)
+            err "ROUTING_PROTOCOL='$ROUTING_PROTOCOL' inválido (use ospf, bgp ou none)"
+            : > /etc/frr/frr.conf
+            ;;
+    esac
+
+    # Habilita no /etc/frr/daemons apenas o daemon do protocolo em uso: deixar o
+    # outro ligado só gera ruído de log e um processo à toa.
+    sed -i 's/^zebra=.*/zebra=yes/;s/^ospfd=.*/ospfd=no/;s/^bgpd=.*/bgpd=no/' \
+        /etc/frr/daemons 2>/dev/null
+    case "${ROUTING_PROTOCOL,,}" in
+        ospf)
+            sed -i 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons 2>/dev/null
+            grep -q '^ospfd=yes' /etc/frr/daemons 2>/dev/null || echo 'ospfd=yes' >> /etc/frr/daemons
+            ;;
+        bgp)
+            sed -i 's/^bgpd=.*/bgpd=yes/' /etc/frr/daemons 2>/dev/null
+            grep -q '^bgpd=yes' /etc/frr/daemons 2>/dev/null || echo 'bgpd=yes' >> /etc/frr/daemons
+            ;;
     esac
 
     chown -R frr:frr /etc/frr /run/frr 2>/dev/null
@@ -508,6 +514,7 @@ build_openconnect_args() {
     [ -n "$VPN_GROUP" ]    && OC_ARGS+=(--authgroup="$VPN_GROUP")
     [ -n "$VPN_PROTOCOL" ] && OC_ARGS+=(--protocol="$VPN_PROTOCOL")
     [ -n "$VPN_MTU" ]      && OC_ARGS+=(--mtu="$VPN_MTU")
+    is_yes "$VPN_DEBUG"    && OC_ARGS+=(--dump-http-traffic)
     [ -n "$VPN_2FA" ]      && OC_ARGS+=(--form-entry="main:secondary_password=$VPN_2FA")
 
     if [ -n "$VPN_FORM_ENTRIES" ]; then
@@ -528,23 +535,46 @@ build_openconnect_args() {
     OC_ARGS+=("$VPN_SERVER")
 }
 
-vpn_loop() {
-    local attempt=0 rc
-    while ! shutting_down; do
-        attempt=$((attempt + 1))
-        log "--- conectando em $VPN_SERVER (tentativa $attempt) ---"
+run_vpn() {
+    local rc
 
-        printf '%s\n' "$REAL_PASS" | openconnect "${OC_ARGS[@]}" &
-        OC_PID=$!
-        wait "$OC_PID"
-        rc=$?
-        OC_PID=""
+    if is_yes "$DRY_RUN"; then
+        log "===================== DRY RUN ====================="
+        log "DRY_RUN=yes — o openconnect NÃO será executado e nenhuma tentativa"
+        log "de autenticação será gasta. Comando que seria executado (a senha vai"
+        log "por stdin, por isso não aparece na linha de comando):"
+        log ""
+        log "    printf '%s\n' \"\$SENHA\" | openconnect ${OC_ARGS[*]}"
+        log ""
+        log "O container fica de pé para inspeção (rode mkvpn-status.sh)."
+        log "Pare com /container/stop e remova DRY_RUN para conectar de verdade."
+        log "==================================================="
+        idle_forever
+        return 0
+    fi
 
-        shutting_down && return 0
-        warn "openconnect terminou (rc=$rc); nova tentativa em ${VPN_RETRY_DELAY}s"
-        sleep "$VPN_RETRY_DELAY" &
-        wait $! 2>/dev/null
-    done
+    log "--- conectando em $VPN_SERVER (tentativa única) ---"
+    printf '%s\n' "$REAL_PASS" | openconnect "${OC_ARGS[@]}" &
+    OC_PID=$!
+    wait "$OC_PID"
+    rc=$?
+    OC_PID=""
+
+    shutting_down && return 0
+
+    if [ "$rc" -eq 0 ]; then
+        log "openconnect encerrou normalmente (rc=0)."
+    else
+        err "openconnect terminou com rc=$rc."
+    fi
+
+    # Sem reconexão automática, por decisão de projeto: o concentrador bloqueia
+    # a conta após duas falhas de autenticação, e um laço de retry poderia
+    # queimar as duas tentativas sozinho. Quem decide tentar de novo é o
+    # operador, iniciando o container.
+    warn "não haverá reconexão automática. Verifique o motivo acima e inicie o"
+    warn "container manualmente quando quiser tentar de novo."
+    return "$rc"
 }
 
 idle_forever() {
@@ -576,7 +606,7 @@ cleanup() {
     pkill -TERM -x squid      2>/dev/null
     pkill -TERM -x microsocks 2>/dev/null
     log "encerrado."
-    exit 0
+    exit "${1:-0}"
 }
 trap cleanup TERM INT
 
@@ -626,5 +656,6 @@ else
 fi
 
 build_openconnect_args
-vpn_loop
-cleanup
+run_vpn
+VPN_RC=$?
+cleanup "$VPN_RC"
