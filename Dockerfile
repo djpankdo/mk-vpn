@@ -31,6 +31,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
+# Remove as configurações que os pacotes do Debian instalam. O entrypoint decide
+# "veio de mount?" pela simples existência do arquivo — deixar o default do
+# pacote no lugar faz o container achar que o usuário forneceu configuração e
+# nunca gerar a sua, subindo o Squid com "deny all" e o FRR sem OSPF.
+RUN rm -f /etc/squid/squid.conf /etc/frr/frr.conf
+
 # Diretórios de runtime. /etc/frr e /etc/squid podem ser sobrescritos por mount
 # do RouterOS; os templates ficam em /etc/mk-vpn e só são aplicados se o destino
 # ainda não tiver configuração própria.

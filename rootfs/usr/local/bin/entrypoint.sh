@@ -228,13 +228,30 @@ supervise() {
 }
 
 # ---------------------------------------------------------------------------
+# 5b. Configuração veio de mount?
+#     Detectar por conteúdo não serve: os pacotes squid e frr do Debian já
+#     trazem seus próprios arquivos, e o container concluiria que são do
+#     usuário — subindo o Squid com "deny all" e o FRR sem roteamento. Um mount
+#     do RouterOS, por outro lado, aparece sempre em /proc/self/mounts.
+# ---------------------------------------------------------------------------
+config_from_mount() {
+    local path
+    for path in "$@"; do
+        awk -v p="$path" '$2 == p { found = 1 } END { exit !found }'             /proc/self/mounts 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # 6. Squid — sem squid.conf próprio, o default upstream é
 #    "allow localhost; deny all", ou seja, nega toda a LAN.
 # ---------------------------------------------------------------------------
 start_squid() {
     is_yes "$ENABLE_SQUID" || { log "Squid desabilitado (ENABLE_SQUID=$ENABLE_SQUID)"; return 0; }
 
-    if [ ! -s /etc/squid/squid.conf ] || grep -q 'mk-vpn managed' /etc/squid/squid.conf 2>/dev/null; then
+    if config_from_mount /etc/squid /etc/squid/squid.conf; then
+        log "usando /etc/squid/squid.conf fornecido por mount"
+    else
         {
             echo "# mk-vpn managed — gerado a partir de PROXY_ALLOW/SQUID_PORT."
             echo "# Monte seu próprio /etc/squid/squid.conf para substituir."
@@ -245,8 +262,6 @@ start_squid() {
             echo "http_port $SQUID_PORT"
         } > /etc/squid/squid.conf
         log "squid.conf gerado (porta $SQUID_PORT, redes permitidas: $PROXY_ALLOW)"
-    else
-        log "usando /etc/squid/squid.conf fornecido por mount"
     fi
 
     if ! squid -k parse -f /etc/squid/squid.conf >/dev/null 2>&1; then
@@ -408,7 +423,7 @@ start_frr() {
     fi
     [ -n "$rid" ] || rid="0.0.0.1"
 
-    if [ -s /etc/frr/frr.conf ] && ! grep -q 'mk-vpn managed' /etc/frr/frr.conf 2>/dev/null; then
+    if config_from_mount /etc/frr /etc/frr/frr.conf; then
         log "usando /etc/frr/frr.conf fornecido por mount"
     else
         case "${ROUTING_PROTOCOL,,}" in
