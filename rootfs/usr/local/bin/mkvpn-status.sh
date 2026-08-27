@@ -30,19 +30,11 @@ sec "gateway original salvo"
 printf '  gw=%s dev=%s\n' "$(cat /run/mk-vpn/orig-gw 2>/dev/null)" \
                           "$(cat /run/mk-vpn/orig-dev 2>/dev/null)"
 
-sec "roteamento dinâmico (FRR)"
+sec "OSPF (FRR)"
 if command -v vtysh >/dev/null 2>&1; then
-    case "${ROUTING_PROTOCOL:-ospf}" in
-        bgp)
-            vtysh -c 'show bgp summary'      2>&1 | sed 's/^/  /'
-            vtysh -c 'show bgp ipv4 unicast' 2>&1 | head -40 | sed 's/^/  /'
-            ;;
-        *)
-            vtysh -c 'show ip ospf neighbor'  2>&1 | sed 's/^/  /'
-            vtysh -c 'show ip ospf interface' 2>&1 | head -30 | sed 's/^/  /'
-            vtysh -c 'show ip ospf database'  2>&1 | head -30 | sed 's/^/  /'
-            ;;
-    esac
+    vtysh -c 'show ip ospf neighbor'  2>&1 | sed 's/^/  /'
+    vtysh -c 'show ip ospf interface' 2>&1 | head -30 | sed 's/^/  /'
+    vtysh -c 'show ip ospf database'  2>&1 | head -30 | sed 's/^/  /'
     echo "  --- rotas na visao do zebra ---"
     vtysh -c 'show ip route' 2>&1 | head -40 | sed 's/^/  /'
 else

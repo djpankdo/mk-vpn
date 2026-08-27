@@ -57,12 +57,11 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${PROXY_ALLOW:=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}"
 
 : "${ENABLE_FRR:=yes}"
-: "${ROUTING_PROTOCOL:=ospf}"  # ospf | bgp | none
-: "${ROUTER_ID:=}"             # default: IP da interface voltada ao MikroTik
-: "${UPLINK_IFACE:=}"          # default: interface da rota default (o veth)
+: "${ROUTER_ID:=}"             # vazio = o FRR escolhe sozinho
+: "${UPLINK_IFACE:=}"          # vazio = interface da rota default (o veth)
 : "${ADVERTISE_DEFAULT:=no}"   # yes = anuncia 0.0.0.0/0 ao MikroTik
 
-# OSPF (padrão)
+# OSPF — é o único protocolo suportado, por decisão de projeto.
 : "${OSPF_AREA:=0.0.0.0}"
 : "${OSPF_COST:=}"
 : "${OSPF_HELLO:=}"
@@ -70,18 +69,13 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${OSPF_MD5_KEY:=}"          # se definido, ativa autenticação message-digest
 : "${OSPF_MD5_KEY_ID:=1}"
 
-# BGP (usado apenas com ROUTING_PROTOCOL=bgp)
-: "${BGP_AS:=}"                # ASN local do container
-: "${BGP_PEER:=}"              # IP do MikroTik no veth
-: "${BGP_PEER_AS:=}"
-
 KNOWN_VARS="VPN_SERVER VPN_USER VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_GROUP
 VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_STRICT_CERT VPN_IFACE
 VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_DEBUG DRY_RUN LAN_ROUTES ENABLE_NAT
 ENABLE_MSS_CLAMP ENABLE_SOCKS SOCKS_PORT SOCKS_BIND SOCKS_USER SOCKS_PASS
-ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ROUTING_PROTOCOL ROUTER_ID
-UPLINK_IFACE ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD
-OSPF_MD5_KEY OSPF_MD5_KEY_ID BGP_AS BGP_PEER BGP_PEER_AS"
+ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ROUTER_ID UPLINK_IFACE
+ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD OSPF_MD5_KEY
+OSPF_MD5_KEY_ID"
 
 SECRET_VARS=" VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_2FA VPN_FORM_ENTRIES SOCKS_PASS OSPF_MD5_KEY "
 
@@ -372,46 +366,8 @@ FRREOF
     sed -i '/^$/d' /etc/frr/frr.conf
 }
 
-write_frr_bgp() {
-    local rid="$1" ridline=""
-    [ -n "$rid" ] && ridline=" bgp router-id ${rid}"
-
-    # "no bgp ebgp-requires-policy": sem isso o FRR 8+ não anuncia nada em eBGP.
-    cat > /etc/frr/frr.conf <<FRREOF
-! mk-vpn managed — REGERADO A CADA BOOT a partir das variáveis BGP_*.
-! Editar este arquivo dentro do container não adianta: ele é sobrescrito.
-frr defaults traditional
-hostname mk-vpn
-log stdout informational
-service integrated-vtysh-config
-!
-router bgp ${BGP_AS}
-${ridline}
- no bgp ebgp-requires-policy
- neighbor ${BGP_PEER} remote-as ${BGP_PEER_AS}
- neighbor ${BGP_PEER} description mikrotik
- !
- address-family ipv4 unicast
-  redistribute kernel
-  redistribute connected
-  neighbor ${BGP_PEER} activate
-  neighbor ${BGP_PEER} route-map MKVPN-OUT out
-  neighbor ${BGP_PEER} soft-reconfiguration inbound
- exit-address-family
-!
-$(prefix_policy)
-!
-route-map MKVPN-OUT permit 10
- match ip address prefix-list MKVPN-OUT
-!
-line vty
-!
-FRREOF
-    sed -i '/^$/d' /etc/frr/frr.conf
-}
-
 # ---------------------------------------------------------------------------
-# 8. FRR — redistribui para o MikroTik as rotas que o vpnc-script instalar.
+# 8. FRR/OSPF — redistribui para o MikroTik as rotas que o vpnc-script instalar.
 # ---------------------------------------------------------------------------
 start_frr() {
     is_yes "$ENABLE_FRR" || { log "FRR desabilitado (ENABLE_FRR=$ENABLE_FRR)"; return 0; }
@@ -447,52 +403,21 @@ start_frr() {
 
     # Configuração efêmera: regerada a todo boot, nunca reaproveitada do
     # root-dir persistente do RouterOS.
-    case "${ROUTING_PROTOCOL,,}" in
-        ospf)
-            write_frr_ospf "$iface" "$rid"
-            log "frr.conf gerado: OSPF área $OSPF_AREA em $iface, router-id ${rid:-automático}"
-            ;;
-        bgp)
-            if [ -z "$BGP_AS" ] || [ -z "$BGP_PEER" ] || [ -z "$BGP_PEER_AS" ]; then
-                warn "ROUTING_PROTOCOL=bgp mas BGP_AS/BGP_PEER/BGP_PEER_AS não foram"
-                warn "definidos. O FRR sobe só com o zebra e não anuncia nada."
-                : > /etc/frr/frr.conf
-            else
-                write_frr_bgp "$rid"
-                log "frr.conf gerado: BGP AS $BGP_AS, peer $BGP_PEER (AS $BGP_PEER_AS), router-id ${rid:-automático}"
-            fi
-            ;;
-        none)
-            log "ROUTING_PROTOCOL=none — o FRR sobe só com o zebra"
-            : > /etc/frr/frr.conf
-            ;;
-        *)
-            err "ROUTING_PROTOCOL='$ROUTING_PROTOCOL' inválido (use ospf, bgp ou none)"
-            : > /etc/frr/frr.conf
-            ;;
-    esac
+    write_frr_ospf "$iface" "$rid"
+    log "frr.conf gerado: OSPF área $OSPF_AREA em $iface, router-id ${rid:-automático}"
 
-    # Habilita no /etc/frr/daemons apenas o daemon do protocolo em uso: deixar o
-    # outro ligado só gera ruído de log e um processo à toa.
-    sed -i 's/^zebra=.*/zebra=yes/;s/^ospfd=.*/ospfd=no/;s/^bgpd=.*/bgpd=no/' \
-        /etc/frr/daemons 2>/dev/null
-    case "${ROUTING_PROTOCOL,,}" in
-        ospf)
-            sed -i 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons 2>/dev/null
-            grep -q '^ospfd=yes' /etc/frr/daemons 2>/dev/null || echo 'ospfd=yes' >> /etc/frr/daemons
-            ;;
-        bgp)
-            sed -i 's/^bgpd=.*/bgpd=yes/' /etc/frr/daemons 2>/dev/null
-            grep -q '^bgpd=yes' /etc/frr/daemons 2>/dev/null || echo 'bgpd=yes' >> /etc/frr/daemons
-            ;;
-    esac
+    # Só zebra e ospfd. Deixar outros daemons ligados gera ruído de log e
+    # processos à toa.
+    sed -i 's/^zebra=.*/zebra=yes/;s/^ospfd=.*/ospfd=yes/' /etc/frr/daemons 2>/dev/null
+    sed -i 's/^bgpd=.*/bgpd=no/' /etc/frr/daemons 2>/dev/null
+    grep -q '^ospfd=yes' /etc/frr/daemons 2>/dev/null || echo 'ospfd=yes' >> /etc/frr/daemons
 
     chown -R frr:frr /etc/frr /run/frr 2>/dev/null
     chmod 640 /etc/frr/frr.conf 2>/dev/null
 
     # Com timeout: o FRR não pode segurar o boot. Se o watchfrr travar esperando
     # daemons que não subiram, seguimos para a VPN mesmo assim — um container
-    # sem BGP ainda é útil, um container sem VPN não é.
+    # sem OSPF ainda é útil, um container sem VPN não é.
     if timeout 60 /usr/lib/frr/frrinit.sh start; then
         log "FRR iniciado"
     else

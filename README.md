@@ -116,12 +116,13 @@ cada conexão. Com `VPN_STRICT_CERT=yes` o container recusa conectar até que vo
 | `SQUID_PORT` | `3128` | |
 | `PROXY_ALLOW` | `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16` | Redes autorizadas no Squid. As sub-redes conectadas do próprio container são acrescentadas automaticamente, então normalmente não há o que ajustar ao mudar de rede. |
 
-### Roteamento dinâmico (FRR)
+### OSPF (FRR)
+
+O OSPF é o único protocolo suportado — não há variável para escolher outro.
 
 | Variável | Default | Descrição |
 |---|---|---|
 | `ENABLE_FRR` | `yes` | |
-| `ROUTING_PROTOCOL` | `ospf` | `ospf`, `bgp` ou `none`. |
 | `ROUTER_ID` | automático | Deixe vazio: o FRR escolhe sozinho a partir das interfaces existentes. Fixar um valor amarraria o container a uma rede específica. |
 | `UPLINK_IFACE` | auto | Interface voltada ao MikroTik. Por padrão é detectada como a que carrega a rota default antes de a VPN subir. |
 | `ADVERTISE_DEFAULT` | `no` | `yes` anuncia `0.0.0.0/0` ao MikroTik — cuidado, isso sequestra a saída inteira do roteador. |
@@ -130,7 +131,6 @@ cada conexão. Com `VPN_STRICT_CERT=yes` o container recusa conectar até que vo
 | `OSPF_HELLO` / `OSPF_DEAD` | — | Temporizadores. Precisam bater com os do MikroTik, senão a adjacência não fecha. |
 | `OSPF_MD5_KEY` | — | Se definido, ativa autenticação `message-digest`. |
 | `OSPF_MD5_KEY_ID` | `1` | ID da chave MD5. |
-| `BGP_AS` / `BGP_PEER` / `BGP_PEER_AS` | — | Só com `ROUTING_PROTOCOL=bgp`. |
 
 O container roda o OSPF **apenas** na interface voltada ao MikroTik (`passive-interface
 default` mais `no passive-interface <veth>`), então ele nunca tenta formar adjacência pelo
@@ -177,8 +177,6 @@ Ajuste `disk1` para o nome do seu storage e `172.19.0.0/24` para a rede que pref
 /container/envs/add name=vpn key=VPN_USER     value="seu.usuario"
 /container/envs/add name=vpn key=VPN_PASS_B64 value="c3VhLXNlbmhh"
 /container/envs/add name=vpn key=VPN_GROUP    value="SEU-GRUPO"
-/container/envs/add name=vpn key=ROUTING_PROTOCOL value="ospf"
-
 # na primeira vez, valide sem gastar tentativa de autenticação:
 /container/envs/add name=vpn key=DRY_RUN value="yes"
 ```
