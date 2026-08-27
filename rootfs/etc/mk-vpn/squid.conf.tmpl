@@ -5,7 +5,7 @@ acl Safe_ports port 21          # ftp
 acl Safe_ports port 443         # https
 acl Safe_ports port 70          # gopher
 acl Safe_ports port 210         # wais
-acl Safe_ports port 1025-65535  # portas não registradas
+acl Safe_ports port 1025-65535  # portas nao registradas
 acl Safe_ports port 280         # http-mgmt
 acl Safe_ports port 488         # gss-http
 acl Safe_ports port 591         # filemaker
@@ -20,12 +20,12 @@ http_access allow localhost
 http_access allow mkvpn_clients
 http_access deny all
 
-# Sem cache em disco: o storage do MikroTik não é lugar para isso, e um cache
-# de conteúdo corporativo dentro do roteador não interessa a ninguém.
+# Sem cache em disco: o storage do MikroTik nao e lugar para isso, e um cache
+# de conteudo corporativo dentro do roteador nao interessa a ninguem.
 cache deny all
 cache_mem 8 MB
 
-# Logs no stdout/stderr, que é o que o "/container/log" do RouterOS mostra.
+# Logs no stdout/stderr, que e o que o "/container/log" do RouterOS mostra.
 access_log stdio:/dev/stdout squid
 cache_log /dev/stdout
 cache_store_log none

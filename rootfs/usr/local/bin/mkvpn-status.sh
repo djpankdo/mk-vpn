@@ -1,6 +1,6 @@
 #!/bin/bash
-# Diagnóstico rápido de dentro do container:
-#   /container/shell <n>  →  mkvpn-status.sh
+# Diagnostico rapido de dentro do container:
+#   /container/shell <n>  ->  mkvpn-status.sh
 set -u
 
 sec() { printf '\n===== %s =====\n' "$*"; }
@@ -38,7 +38,7 @@ if command -v vtysh >/dev/null 2>&1; then
     echo "  --- rotas na visao do zebra ---"
     vtysh -c 'show ip route' 2>&1 | head -40 | sed 's/^/  /'
 else
-    echo "  vtysh indisponível"
+    echo "  vtysh indisponivel"
 fi
 
 sec "portas em escuta"

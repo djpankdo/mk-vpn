@@ -1,12 +1,12 @@
 name: build
 
 # Builda a imagem multi-arch e, quando houver credenciais, publica no Docker Hub.
-# Assim o Codespace deixa de ser necessário para gerar a imagem.
+# Assim o Codespace deixa de ser necessario para gerar a imagem.
 #
-# Enquanto os segredos abaixo não existirem, o workflow ainda builda as duas
-# arquiteturas (serve de teste de compilação) e apenas não publica:
-#   DOCKERHUB_USERNAME  — seu usuário do Docker Hub
-#   DOCKERHUB_TOKEN     — token de acesso (Docker Hub → Account Settings → Personal access tokens)
+# Enquanto os segredos abaixo nao existirem, o workflow ainda builda as duas
+# arquiteturas (serve de teste de compilacao) e apenas nao publica:
+#   DOCKERHUB_USERNAME  - seu usuario do Docker Hub
+#   DOCKERHUB_TOKEN     - token de acesso (Docker Hub -> Account Settings -> Personal access tokens)
 
 on:
   push:
@@ -28,8 +28,8 @@ jobs:
           bash -n rootfs/usr/local/bin/vpnc-hook.sh
           bash -n rootfs/usr/local/bin/mkvpn-status.sh
 
-      # O nome da imagem não pode depender do segredo: sem ele a tag sairia
-      # vazia e o metadata-action falharia mesmo num build sem publicação.
+      # O nome da imagem nao pode depender do segredo: sem ele a tag sairia
+      # vazia e o metadata-action falharia mesmo num build sem publicacao.
       - name: Decidir imagem e se publica
         id: cfg
         env:
@@ -45,7 +45,7 @@ jobs:
           else
             echo "push=false" >> "$GITHUB_OUTPUT"
             if [ -z "$DH_TOKEN" ]; then
-              echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN ausentes — buildando sem publicar."
+              echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN ausentes - buildando sem publicar."
             fi
           fi
 
@@ -73,8 +73,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # O RouterOS em RB5009/CCR2004/hAP ax é arm64. amd64 fica para CHR
-          # e para você testar no próprio Codespace.
+          # O RouterOS em RB5009/CCR2004/hAP ax e arm64. amd64 fica para CHR
+          # e para voce testar no proprio Codespace.
           platforms: linux/arm64,linux/amd64
           push: ${{ steps.cfg.outputs.push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}

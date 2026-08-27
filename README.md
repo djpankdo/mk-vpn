@@ -7,7 +7,7 @@ para devolver ao roteador as rotas aprendidas ao conectar o túnel.
 Alvo: RouterOS v7, arquitetura **arm64**, com o container em storage externo
 (NVMe/USB/NAND).
 
-> ## ⚠️ Sem reconexão automática — e por quê
+> ## Sem reconexão automática — e por quê
 >
 > O concentrador **bloqueia a conta após duas falhas de autenticação**. Por isso o
 > container **nunca** tenta reconectar sozinho: quando o openconnect termina, por qualquer
@@ -129,7 +129,9 @@ O OSPF é o único protocolo suportado — não há variável para escolher outr
 | `ADVERTISE_DEFAULT` | `no` | `yes` anuncia `0.0.0.0/0` ao MikroTik — cuidado, isso sequestra a saída inteira do roteador. |
 | `OSPF_AREA` | `0.0.0.0` | |
 | `OSPF_COST` | — | Custo da interface. |
-| `OSPF_HELLO` / `OSPF_DEAD` | — | Temporizadores. Precisam bater com os do MikroTik, senão a adjacência não fecha. |
+| `OSPF_HELLO` | `5` | Segundos entre hellos. |
+| `OSPF_DEAD` | `10` | Segundos até declarar o vizinho morto. |
+| `OSPF_RETRANSMIT` | `2` | Segundos entre retransmissões de LSA. |
 | `OSPF_MD5_KEY` | — | Se definido, ativa autenticação `message-digest`. |
 | `OSPF_MD5_KEY_ID` | `1` | ID da chave MD5. |
 

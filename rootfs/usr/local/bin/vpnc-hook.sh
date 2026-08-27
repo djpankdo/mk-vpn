@@ -2,13 +2,13 @@
 # Wrapper do vpnc-script chamado pelo openconnect (--script).
 #
 # Ele delega tudo ao vpnc-script do Debian (que instala IP, rotas e DNS do
-# túnel) e, depois disso, aplica o que o container precisa para funcionar como
+# tunel) e, depois disso, aplica o que o container precisa para funcionar como
 # gateway dentro do RouterOS:
 #
 #   - devolve a rota default ao MikroTik, se VPN_DEFAULT_ROUTE=no;
-#   - garante rota de volta para as redes da LAN (senão a resposta a um cliente
-#     da LAN sai pelo túnel e o tráfego morre por caminho assimétrico);
-#   - NAT na saída do túnel;
+#   - garante rota de volta para as redes da LAN (senao a resposta a um cliente
+#     da LAN sai pelo tunel e o trafego morre por caminho assimetrico);
+#   - NAT na saida do tunel;
 #   - clamp de MSS.
 #
 # O openconnect exporta "reason", "TUNDEV", "VPNGATEWAY", "CISCO_SPLIT_INC_*"
@@ -37,7 +37,7 @@ if [ -x "$REAL_SCRIPT" ]; then
     "$REAL_SCRIPT" "$@"
     RC=$?
 else
-    log "ERRO: $REAL_SCRIPT não encontrado (pacote vpnc-scripts ausente)"
+    log "ERRO: $REAL_SCRIPT nao encontrado (pacote vpnc-scripts ausente)"
     exit 1
 fi
 
@@ -57,7 +57,7 @@ ipt_remove() {
 }
 
 post_connect() {
-    log "túnel $DEV no ar (reason=$reason, gateway=${VPNGATEWAY:-?})"
+    log "tunel $DEV no ar (reason=$reason, gateway=${VPNGATEWAY:-?})"
 
     local orig_gw orig_dev
     orig_gw=$(cat "$RUNDIR/orig-gw" 2>/dev/null)
@@ -65,9 +65,9 @@ post_connect() {
 
     # --- rota default -------------------------------------------------------
     if ! is_yes "$VPN_DEFAULT_ROUTE"; then
-        # O vpnc-script coloca a default no túnel. Aqui devolvemos ao MikroTik:
-        # quem decide o que vai para a VPN é o roteador, com as rotas que o FRR
-        # anuncia. As rotas específicas do split tunnel continuam no lugar.
+        # O vpnc-script coloca a default no tunel. Aqui devolvemos ao MikroTik:
+        # quem decide o que vai para a VPN e o roteador, com as rotas que o FRR
+        # anuncia. As rotas especificas do split tunnel continuam no lugar.
         if ip route show default | grep -q "dev $DEV"; then
             ip route del default dev "$DEV" 2>/dev/null
             log "rota default via $DEV removida (VPN_DEFAULT_ROUTE=no)"
@@ -77,12 +77,12 @@ post_connect() {
                 && log "rota default restaurada: via $orig_gw dev $orig_dev"
         fi
     else
-        log "rota default mantida no túnel (VPN_DEFAULT_ROUTE=yes)"
+        log "rota default mantida no tunel (VPN_DEFAULT_ROUTE=yes)"
         # Com full tunnel, sem estas rotas a resposta a um cliente da LAN sai
-        # pelo túnel e nada funciona.
+        # pelo tunel e nada funciona.
         if [ -z "$LAN_ROUTES" ]; then
-            log "AVISO: VPN_DEFAULT_ROUTE=yes sem LAN_ROUTES definido — os clientes"
-            log "AVISO: da LAN provavelmente não vão receber resposta."
+            log "AVISO: VPN_DEFAULT_ROUTE=yes sem LAN_ROUTES definido - os clientes"
+            log "AVISO: da LAN provavelmente nao vao receber resposta."
         fi
     fi
 
@@ -101,7 +101,7 @@ post_connect() {
     # --- NAT ----------------------------------------------------------------
     if is_yes "$ENABLE_NAT"; then
         ipt_ensure nat POSTROUTING -o "$DEV" -j MASQUERADE \
-            && log "MASQUERADE ativo na saída de $DEV"
+            && log "MASQUERADE ativo na saida de $DEV"
     fi
 
     # --- MSS ----------------------------------------------------------------
@@ -112,15 +112,15 @@ post_connect() {
             -j TCPMSS --clamp-mss-to-pmtu
     fi
 
-    # O IP com que o openconnect realmente falou pode não ser o que resolvemos
-    # no boot (DNS round-robin entre concentradores). Sem excluí-lo, a rota host
+    # O IP com que o openconnect realmente falou pode nao ser o que resolvemos
+    # no boot (DNS round-robin entre concentradores). Sem exclui-lo, a rota host
     # que o vpnc-script acabou de instalar vaza para o OSPF e o MikroTik passa a
-    # rotear o concentrador pelo container — que o alcança pelo MikroTik.
+    # rotear o concentrador pelo container - que o alcanca pelo MikroTik.
     if [ -n "${VPNGATEWAY:-}" ] && command -v vtysh >/dev/null 2>&1; then
         if vtysh -c 'configure terminal'                  -c "ip prefix-list exclude_VPNGW seq 100 deny ${VPNGATEWAY}/32 le 32"                  >/dev/null 2>&1; then
-            log "concentrador $VPNGATEWAY excluído da redistribuição OSPF"
+            log "concentrador $VPNGATEWAY excluido da redistribuicao OSPF"
         else
-            log "AVISO: não consegui excluir $VPNGATEWAY da redistribuição OSPF"
+            log "AVISO: nao consegui excluir $VPNGATEWAY da redistribuicao OSPF"
         fi
     fi
 
@@ -131,7 +131,7 @@ post_connect() {
 }
 
 post_disconnect() {
-    log "túnel $DEV encerrado (reason=$reason); limpando regras"
+    log "tunel $DEV encerrado (reason=$reason); limpando regras"
     is_yes "$ENABLE_NAT" && ipt_remove nat POSTROUTING -o "$DEV" -j MASQUERADE
     if is_yes "$ENABLE_MSS_CLAMP"; then
         ipt_remove mangle FORWARD -o "$DEV" -p tcp --tcp-flags SYN,RST SYN \
