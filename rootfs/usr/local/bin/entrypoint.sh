@@ -51,20 +51,33 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 : "${PROXY_ALLOW:=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}"
 
 : "${ENABLE_FRR:=yes}"
+: "${ROUTING_PROTOCOL:=ospf}"  # ospf | bgp | none
+: "${ROUTER_ID:=}"             # default: IP da interface voltada ao MikroTik
+: "${UPLINK_IFACE:=}"          # default: interface da rota default (o veth)
+: "${ADVERTISE_DEFAULT:=no}"   # yes = anuncia 0.0.0.0/0 ao MikroTik
+
+# OSPF (padrão)
+: "${OSPF_AREA:=0.0.0.0}"
+: "${OSPF_COST:=}"
+: "${OSPF_HELLO:=}"
+: "${OSPF_DEAD:=}"
+: "${OSPF_MD5_KEY:=}"          # se definido, ativa autenticação message-digest
+: "${OSPF_MD5_KEY_ID:=1}"
+
+# BGP (usado apenas com ROUTING_PROTOCOL=bgp)
 : "${BGP_AS:=}"                # ASN local do container
 : "${BGP_PEER:=}"              # IP do MikroTik no veth
 : "${BGP_PEER_AS:=}"
-: "${BGP_ROUTER_ID:=}"         # default: IP primário da interface de saída
-: "${BGP_ADVERTISE_DEFAULT:=no}"
 
 KNOWN_VARS="VPN_SERVER VPN_USER VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_GROUP
 VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_INSECURE VPN_IFACE
 VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_RETRY_DELAY LAN_ROUTES ENABLE_NAT
 ENABLE_MSS_CLAMP ENABLE_SOCKS SOCKS_PORT SOCKS_BIND SOCKS_USER SOCKS_PASS
-ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR BGP_AS BGP_PEER BGP_PEER_AS
-BGP_ROUTER_ID BGP_ADVERTISE_DEFAULT"
+ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ROUTING_PROTOCOL ROUTER_ID
+UPLINK_IFACE ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD
+OSPF_MD5_KEY OSPF_MD5_KEY_ID BGP_AS BGP_PEER BGP_PEER_AS"
 
-SECRET_VARS=" VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_2FA VPN_FORM_ENTRIES SOCKS_PASS "
+SECRET_VARS=" VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_2FA VPN_FORM_ENTRIES SOCKS_PASS OSPF_MD5_KEY "
 
 is_yes() { case "${1,,}" in yes|y|true|1|on) return 0 ;; *) return 1 ;; esac; }
 
@@ -266,49 +279,74 @@ start_socks() {
 }
 
 # ---------------------------------------------------------------------------
-# 8. FRR — redistribui para o MikroTik as rotas que o vpnc-script instalar.
+# 8a. Geração do frr.conf
+#     A política de saída nega 0.0.0.0/0 por padrão: anunciar a default ao
+#     MikroTik sequestraria a saída do roteador inteiro.
 # ---------------------------------------------------------------------------
-start_frr() {
-    is_yes "$ENABLE_FRR" || { log "FRR desabilitado (ENABLE_FRR=$ENABLE_FRR)"; return 0; }
-
-    # O RouterOS persiste o filesystem do container no root-dir, então /run NÃO
-    # é tmpfs: pid files e sockets da execução anterior sobrevivem ao restart.
-    # Sem limpar, o FRR falha com "Can't create pid lock file" e "Address
-    # already in use", o watchfrr fica preso em "Waiting for children to finish
-    # applying config..." e o entrypoint nunca chega a conectar a VPN.
-    rm -rf /run/frr/* /var/tmp/frr/* 2>/dev/null
-    mkdir -p /run/frr /var/tmp/frr
-    chown frr:frr /run/frr /var/tmp/frr 2>/dev/null
-    rm -f /run/squid.pid 2>/dev/null
-
-    if [ -s /etc/frr/frr.conf ] && ! grep -q 'mk-vpn managed' /etc/frr/frr.conf 2>/dev/null; then
-        log "usando /etc/frr/frr.conf fornecido por mount"
-    elif [ -z "$BGP_AS" ] || [ -z "$BGP_PEER" ] || [ -z "$BGP_PEER_AS" ]; then
-        warn "BGP_AS / BGP_PEER / BGP_PEER_AS não definidos e nenhum frr.conf montado."
-        warn "O FRR vai subir só com o zebra e não anunciará rota nenhuma."
-        : > /etc/frr/frr.conf
+prefix_policy() {
+    if is_yes "$ADVERTISE_DEFAULT"; then
+        echo "ip prefix-list MKVPN-OUT seq 10 permit 0.0.0.0/0 le 32"
     else
-        local rid defpol
-        rid="$BGP_ROUTER_ID"
-        if [ -z "$rid" ]; then
-            rid=$(ip -4 -o addr show scope global 2>/dev/null \
-                  | awk -v t="$VPN_IFACE" '$2 != t {print $4}' | cut -d/ -f1 | head -1)
-        fi
-        [ -n "$rid" ] || rid="0.0.0.1"
+        echo "ip prefix-list MKVPN-OUT seq 5 deny 0.0.0.0/0"
+        echo "ip prefix-list MKVPN-OUT seq 10 permit 0.0.0.0/0 le 32"
+    fi
+}
 
-        if is_yes "$BGP_ADVERTISE_DEFAULT"; then
-            defpol="ip prefix-list MKVPN-OUT seq 10 permit 0.0.0.0/0 le 32"
-        else
-            # Anunciar 0.0.0.0/0 sequestraria a saída do MikroTik inteiro.
-            defpol="ip prefix-list MKVPN-OUT seq 5 deny 0.0.0.0/0
-ip prefix-list MKVPN-OUT seq 10 permit 0.0.0.0/0 le 32"
-        fi
+write_frr_ospf() {
+    local iface="$1" rid="$2" ifextra="" deforig=""
 
-        # "no bgp ebgp-requires-policy": sem isso o FRR 8+ não anuncia nada em
-        # eBGP. As rotas do túnel entram no zebra como "kernel" (quem as instala
-        # é o vpnc-script), daí o "redistribute kernel".
-        cat > /etc/frr/frr.conf <<FRREOF
-! mk-vpn managed — gerado a partir das variáveis BGP_*.
+    if [ -n "$OSPF_MD5_KEY" ]; then
+        ifextra="${ifextra}
+ ip ospf authentication message-digest
+ ip ospf message-digest-key ${OSPF_MD5_KEY_ID} md5 ${OSPF_MD5_KEY}"
+    fi
+    [ -n "$OSPF_COST" ]  && ifextra="${ifextra}
+ ip ospf cost ${OSPF_COST}"
+    [ -n "$OSPF_HELLO" ] && ifextra="${ifextra}
+ ip ospf hello-interval ${OSPF_HELLO}"
+    [ -n "$OSPF_DEAD" ]  && ifextra="${ifextra}
+ ip ospf dead-interval ${OSPF_DEAD}"
+    is_yes "$ADVERTISE_DEFAULT" && deforig=" default-information originate"
+
+    # "passive-interface default" + "no passive-interface <veth>" mantém o OSPF
+    # falando só com o MikroTik: nada de tentar adjacência pelo túnel.
+    # As rotas do split tunnel entram no zebra como "kernel" (quem as instala é
+    # o vpnc-script), por isso "redistribute kernel".
+    cat > /etc/frr/frr.conf <<FRREOF
+! mk-vpn managed — gerado a partir das variáveis OSPF_*/ROUTER_ID.
+! Monte seu próprio /etc/frr/frr.conf para substituir este arquivo.
+frr defaults traditional
+hostname mk-vpn
+log stdout informational
+service integrated-vtysh-config
+!
+interface ${iface}
+ ip ospf area ${OSPF_AREA}${ifextra}
+!
+router ospf
+ ospf router-id ${rid}
+ passive-interface default
+ no passive-interface ${iface}
+ redistribute kernel route-map MKVPN-OUT
+ redistribute connected route-map MKVPN-OUT
+${deforig}
+!
+$(prefix_policy)
+!
+route-map MKVPN-OUT permit 10
+ match ip address prefix-list MKVPN-OUT
+!
+line vty
+!
+FRREOF
+}
+
+write_frr_bgp() {
+    local rid="$1"
+
+    # "no bgp ebgp-requires-policy": sem isso o FRR 8+ não anuncia nada em eBGP.
+    cat > /etc/frr/frr.conf <<FRREOF
+! mk-vpn managed — gerado a partir das variáveis BGP_*/ROUTER_ID.
 ! Monte seu próprio /etc/frr/frr.conf para substituir este arquivo.
 frr defaults traditional
 hostname mk-vpn
@@ -329,7 +367,7 @@ router bgp ${BGP_AS}
   neighbor ${BGP_PEER} soft-reconfiguration inbound
  exit-address-family
 !
-${defpol}
+$(prefix_policy)
 !
 route-map MKVPN-OUT permit 10
  match ip address prefix-list MKVPN-OUT
@@ -337,12 +375,77 @@ route-map MKVPN-OUT permit 10
 line vty
 !
 FRREOF
-        log "frr.conf gerado: AS $BGP_AS, peer $BGP_PEER (AS $BGP_PEER_AS), router-id $rid"
+}
+
+# ---------------------------------------------------------------------------
+# 8. FRR — redistribui para o MikroTik as rotas que o vpnc-script instalar.
+# ---------------------------------------------------------------------------
+start_frr() {
+    is_yes "$ENABLE_FRR" || { log "FRR desabilitado (ENABLE_FRR=$ENABLE_FRR)"; return 0; }
+
+    # O RouterOS persiste o filesystem do container no root-dir, então /run NÃO
+    # é tmpfs: pid files e sockets da execução anterior sobrevivem ao restart.
+    # Sem limpar, o FRR falha com "Can't create pid lock file" e "Address
+    # already in use", o watchfrr fica preso em "Waiting for children to finish
+    # applying config..." e o entrypoint nunca chega a conectar a VPN.
+    rm -rf /run/frr/* /var/tmp/frr/* 2>/dev/null
+    mkdir -p /run/frr /var/tmp/frr
+    chown frr:frr /run/frr /var/tmp/frr 2>/dev/null
+    rm -f /run/squid.pid 2>/dev/null
+
+    local rid iface
+    iface="$UPLINK_IFACE"
+    if [ -z "$iface" ]; then
+        # A interface do veth é a que carrega a rota default antes de a VPN
+        # subir — é por ela que falamos com o MikroTik.
+        iface=$(ip route show default 2>/dev/null                 | awk '{for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+    fi
+    [ -n "$iface" ] || iface=$(ip -o link show 2>/dev/null                                | awk -F': ' '$2!="lo"{print $2}' | head -1)
+
+    rid="$ROUTER_ID"
+    if [ -z "$rid" ]; then
+        rid=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null               | awk '{print $4}' | cut -d/ -f1 | head -1)
+    fi
+    [ -n "$rid" ] || rid="0.0.0.1"
+
+    if [ -s /etc/frr/frr.conf ] && ! grep -q 'mk-vpn managed' /etc/frr/frr.conf 2>/dev/null; then
+        log "usando /etc/frr/frr.conf fornecido por mount"
+    else
+        case "${ROUTING_PROTOCOL,,}" in
+            ospf)
+                write_frr_ospf "$iface" "$rid"
+                log "frr.conf gerado: OSPF area $OSPF_AREA em $iface, router-id $rid"
+                ;;
+            bgp)
+                if [ -z "$BGP_AS" ] || [ -z "$BGP_PEER" ] || [ -z "$BGP_PEER_AS" ]; then
+                    warn "ROUTING_PROTOCOL=bgp mas BGP_AS/BGP_PEER/BGP_PEER_AS não foram"
+                    warn "definidos. O FRR sobe só com o zebra e não anuncia nada."
+                    : > /etc/frr/frr.conf
+                else
+                    write_frr_bgp "$rid"
+                    log "frr.conf gerado: BGP AS $BGP_AS, peer $BGP_PEER (AS $BGP_PEER_AS), router-id $rid"
+                fi
+                ;;
+            none)
+                log "ROUTING_PROTOCOL=none — o FRR sobe só com o zebra"
+                : > /etc/frr/frr.conf
+                ;;
+            *)
+                err "ROUTING_PROTOCOL='$ROUTING_PROTOCOL' inválido (use ospf, bgp ou none)"
+                : > /etc/frr/frr.conf
+                ;;
+        esac
     fi
 
-    sed -i 's/^bgpd=.*/bgpd=yes/'   /etc/frr/daemons 2>/dev/null
-    sed -i 's/^zebra=.*/zebra=yes/' /etc/frr/daemons 2>/dev/null
-    grep -q '^bgpd=yes' /etc/frr/daemons 2>/dev/null || echo 'bgpd=yes' >> /etc/frr/daemons
+    # Habilita no /etc/frr/daemons apenas o daemon do protocolo em uso: deixar
+    # o outro ligado só gera ruído de log e um processo à toa.
+    sed -i 's/^zebra=.*/zebra=yes/;s/^ospfd=.*/ospfd=no/;s/^bgpd=.*/bgpd=no/'         /etc/frr/daemons 2>/dev/null
+    case "${ROUTING_PROTOCOL,,}" in
+        ospf) sed -i 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons 2>/dev/null
+              grep -q '^ospfd=yes' /etc/frr/daemons 2>/dev/null || echo 'ospfd=yes' >> /etc/frr/daemons ;;
+        bgp)  sed -i 's/^bgpd=.*/bgpd=yes/'  /etc/frr/daemons 2>/dev/null
+              grep -q '^bgpd=yes'  /etc/frr/daemons 2>/dev/null || echo 'bgpd=yes'  >> /etc/frr/daemons ;;
+    esac
 
     chown -R frr:frr /etc/frr /run/frr 2>/dev/null
     chmod 640 /etc/frr/frr.conf 2>/dev/null
