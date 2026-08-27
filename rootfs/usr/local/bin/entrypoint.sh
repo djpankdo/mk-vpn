@@ -271,6 +271,16 @@ start_socks() {
 start_frr() {
     is_yes "$ENABLE_FRR" || { log "FRR desabilitado (ENABLE_FRR=$ENABLE_FRR)"; return 0; }
 
+    # O RouterOS persiste o filesystem do container no root-dir, então /run NÃO
+    # é tmpfs: pid files e sockets da execução anterior sobrevivem ao restart.
+    # Sem limpar, o FRR falha com "Can't create pid lock file" e "Address
+    # already in use", o watchfrr fica preso em "Waiting for children to finish
+    # applying config..." e o entrypoint nunca chega a conectar a VPN.
+    rm -rf /run/frr/* /var/tmp/frr/* 2>/dev/null
+    mkdir -p /run/frr /var/tmp/frr
+    chown frr:frr /run/frr /var/tmp/frr 2>/dev/null
+    rm -f /run/squid.pid 2>/dev/null
+
     if [ -s /etc/frr/frr.conf ] && ! grep -q 'mk-vpn managed' /etc/frr/frr.conf 2>/dev/null; then
         log "usando /etc/frr/frr.conf fornecido por mount"
     elif [ -z "$BGP_AS" ] || [ -z "$BGP_PEER" ] || [ -z "$BGP_PEER_AS" ]; then
@@ -337,10 +347,13 @@ FRREOF
     chown -R frr:frr /etc/frr /run/frr 2>/dev/null
     chmod 640 /etc/frr/frr.conf 2>/dev/null
 
-    if /usr/lib/frr/frrinit.sh start; then
+    # Com timeout: o FRR não pode segurar o boot. Se o watchfrr travar esperando
+    # daemons que não subiram, seguimos para a VPN mesmo assim — um container
+    # sem BGP ainda é útil, um container sem VPN não é.
+    if timeout 60 /usr/lib/frr/frrinit.sh start; then
         log "FRR iniciado"
     else
-        err "falha ao iniciar o FRR"
+        err "FRR não subiu (rc=$?); seguindo sem ele. Rode 'mkvpn-status.sh' para ver o estado."
     fi
 }
 
