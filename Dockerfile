@@ -63,4 +63,10 @@ STOPSIGNAL SIGTERM
 
 WORKDIR /run/mk-vpn
 
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/entrypoint.sh"]
+# O entrypoint roda como PID 1, sem tini. O tini nao instala handlers de
+# sinal: ele bloqueia tudo e usa sigtimedwait, entao o SigCgt do PID 1 fica
+# zerado. O RouterOS le isso, conclui que o SIGTERM "nao seria capturado" e
+# vai direto ao SIGKILL, sem nunca entregar o sinal ao nosso trap -- o que
+# inviabiliza a parada graciosa. Com o bash em PID 1 o trap aparece no
+# SigCgt e o RouterOS entrega o SIGTERM normalmente.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -122,6 +122,10 @@ dump_env() {
 
     log "interfaces: $(ip -br addr show 2>/dev/null | tr '\n' '|')"
     log "rota default: $(ip route show default 2>/dev/null | head -1)"
+    # SigCgt do PID 1: e o que o RouterOS consulta para decidir se vale a pena
+    # mandar SIGTERM ou se ja pode matar. O bit do SIGTERM e o 0x4000.
+    log "PID 1 = $(cat /proc/1/comm 2>/dev/null), este shell = PID $$"
+    log "sinais capturados pelo PID 1: SigCgt=$(awk '/^SigCgt/{print $2}' /proc/1/status 2>/dev/null)"
     log "==========================================================="
 }
 
