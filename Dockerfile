@@ -47,10 +47,17 @@ COPY rootfs/ /
 
 RUN chmod +x /usr/local/bin/entrypoint.sh \
              /usr/local/bin/vpnc-hook.sh \
-             /usr/local/bin/mkvpn-status.sh
+             /usr/local/bin/mkvpn-status.sh \
+             /usr/local/bin/healthcheck.sh
 
 # Informativo apenas: o RouterOS ignora EXPOSE.
 EXPOSE 1080/tcp 3128/tcp 179/tcp
+
+# O RouterOS le esta instrucao da imagem e expoe o resultado em
+# /container/print. O start-period da tempo de o OSPF fechar adjacencia e
+# de a VPN autenticar antes da primeira cobranca.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh
 
 STOPSIGNAL SIGTERM
 

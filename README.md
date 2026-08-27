@@ -255,6 +255,40 @@ Com autenticação (precisa casar com `OSPF_MD5_KEY`/`OSPF_MD5_KEY_ID` no contai
 
 ---
 
+## Healthcheck
+
+A imagem traz uma instrução `HEALTHCHECK`, que o RouterOS lê e expõe em
+`/container/print`. O script verifica, a cada 30 segundos:
+
+- o IP anycast presente na loopback;
+- Squid e microsocks rodando **e** escutando nas portas configuradas;
+- `ospfd` vivo e ao menos um vizinho OSPF em estado `Full` — sem adjacência o anycast não
+  chega ao roteador e o container está inútil mesmo com todo o resto de pé;
+- `openconnect` vivo **e** a interface do túnel com endereço IPv4. Um processo vivo sem
+  endereço na `tun` é exatamente o caso que um `status=running` esconderia.
+
+Em `DRY_RUN` a ausência da VPN não conta como falha, já que ela não sobe de propósito.
+Componentes desligados por configuração (`ENABLE_SQUID=no`, por exemplo) também não são
+cobrados.
+
+### `stop-on-unhealthy`
+
+O RouterOS tem a opção `stop-on-unhealthy`, desligada por padrão:
+
+```routeros
+/container/set 0 stop-on-unhealthy=yes
+```
+
+Repare que ela **para** o container, não o reinicia — o que combina com a regra deste
+projeto de nunca reconectar sozinho. Ligada, um túnel que morreu por baixo derruba o
+container de forma limpa, em vez de deixá-lo `running` e inútil.
+
+O preço é o falso negativo: se o healthcheck errar, ele derruba um túnel que estava
+funcionando, e reconectar custa uma das duas tentativas de autenticação que a conta tem.
+Vale ligar só depois de ver o healthcheck se comportando por alguns ciclos.
+
+---
+
 ## Depuração
 
 Ao iniciar, o container imprime **todas** as variáveis que reconheceu (segredos aparecem
