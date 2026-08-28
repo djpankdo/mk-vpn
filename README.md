@@ -354,6 +354,39 @@ Em `DRY_RUN` a ausência da VPN não conta como falha, já que ela não sobe de 
 Componentes desligados por configuração (`ENABLE_SQUID=no`, por exemplo) também não são
 cobrados.
 
+### Teste de trafego pelo tunel
+
+`VPN_PING_TARGETS` recebe uma lista de IPv4 separados por espaco. O healthcheck pinga esses
+enderecos, e isso serve a dois propositos distintos:
+
+- **Provar que o tunel passa pacote**, e nao apenas que a interface tem endereco. Um
+  `openconnect` vivo com `tun0` configurado ainda pode estar com o tunel morto por baixo.
+- **Manter a sessao viva.** O concentrador desconecta por inatividade; com o healthcheck
+  rodando a cada 30 segundos, o ping funciona como keepalive.
+
+| Variável | Default | Descrição |
+|---|---|---|
+| `VPN_PING_TARGETS` | — | IPv4 separados por espaço. Ausente ou sem nenhum IPv4 válido, o teste fica desabilitado. |
+| `VPN_PING_COUNT` | `2` | Pacotes por alvo. |
+| `VPN_PING_DEADLINE` | `2` | Segundos de prazo por alvo. |
+
+**Escolha alvos que só existam do lado corporativo.** Um IP alcançável pela WAN responderia
+mesmo com o tunel morto, e o teste nao valeria nada.
+
+Basta **um** alvo responder para o container ser considerado saudável — o que se testa é o
+túnel, não a saúde de cada host — e a varredura para no primeiro sucesso. Se nenhum
+responder, o container fica não-saudável.
+
+Um valor presente mas sem nenhum IPv4 válido **desabilita** o teste em vez de reprovar:
+derrubar um túnel que funciona por causa de um erro de digitação seria pior que não testar.
+
+O orçamento de tempo no pior caso é `numero de alvos x VPN_PING_DEADLINE` segundos, e o
+`HEALTHCHECK` da imagem tem timeout de 20s — mantenha a lista curta, dois ou três
+endereços.
+
+O ping usa `-A` (adaptativo), que ajusta o intervalo ao tempo de resposta em vez de esperar
+um segundo fixo entre pacotes.
+
 ### `stop-on-unhealthy`
 
 O RouterOS tem a opção `stop-on-unhealthy`, desligada por padrão:

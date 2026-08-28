@@ -21,10 +21,30 @@ set -u
 : "${SOCKS_PORT:=1080}"
 : "${ENABLE_FRR:=yes}"
 
+# Lista de IPv4 separados por espaco. Sem valor, ou sem nenhum IPv4 valido, o
+# teste fica desabilitado -- nunca tratado como falha: derrubar um tunel que
+# funciona por causa de um erro de digitacao seria pior do que nao testar.
+: "${VPN_PING_TARGETS:=}"
+: "${VPN_PING_COUNT:=2}"
+: "${VPN_PING_DEADLINE:=2}"
+
 is_yes() { case "${1,,}" in yes|y|true|1|on) return 0 ;; *) return 1 ;; esac; }
 
 problemas=""
 anota() { problemas="${problemas}${problemas:+; }$1"; }
+
+ipv4_valido() {
+    local ip="$1" o
+    case "$ip" in ''|*[!0-9.]*|*..*|.*|*.) return 1 ;; esac
+    local IFS=.
+    set -- $ip
+    [ $# -eq 4 ] || return 1
+    for o in "$@"; do
+        case "$o" in ''|*[!0-9]*) return 1 ;; esac
+        [ "${#o}" -le 3 ] && [ "$o" -le 255 ] || return 1
+    done
+    return 0
+}
 
 porta_escutando() {
     ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"
@@ -73,6 +93,40 @@ elif [ -n "$VPN_SERVER" ]; then
     fi
 fi
 
+# --- trafego real pelo tunel -----------------------------------------------
+# Dois motivos, e nenhum deles e coberto pelas verificacoes acima. Primeiro,
+# provar que o tunel passa pacote de verdade, e nao apenas que a interface tem
+# endereco. Segundo, gerar trafego periodico: o concentrador derruba a sessao
+# por inatividade, e o healthcheck rodando a cada 30s serve de keepalive.
+#
+# Escolha alvos que so existam do lado corporativo; um IP alcancavel pela WAN
+# responderia mesmo com o tunel morto e o teste nao valeria nada.
+ping_estado=""
+if is_yes "$DRY_RUN"; then
+    ping_estado=""
+elif [ -n "$VPN_PING_TARGETS" ]; then
+    alvos=""
+    for alvo in $VPN_PING_TARGETS; do
+        ipv4_valido "$alvo" && alvos="$alvos $alvo"
+    done
+    if [ -z "$alvos" ]; then
+        ping_estado="ping desabilitado (VPN_PING_TARGETS sem IPv4 valido)"
+    else
+        # Basta um alvo responder: o que se testa e o tunel, nao a saude de
+        # cada host. Para no primeiro sucesso para caber no timeout do
+        # healthcheck.
+        for alvo in $alvos; do
+            if ping -A -n -q -c "$VPN_PING_COUNT" -w "$VPN_PING_DEADLINE" "$alvo" >/dev/null 2>&1; then
+                ping_estado="ping ok em $alvo"
+                break
+            fi
+        done
+        if [ -z "$ping_estado" ]; then
+            anota "nenhum alvo respondeu ao ping pelo tunel ($alvos )"
+        fi
+    fi
+fi
+
 # --- veredito --------------------------------------------------------------
 if [ -n "$problemas" ]; then
     echo "NAO SAUDAVEL: ${problemas}"
@@ -92,5 +146,6 @@ if is_yes "$DRY_RUN"; then
 elif [ -n "$VPN_SERVER" ]; then
     soma "VPN em ${VPN_IFACE}"
 fi
+[ -n "$ping_estado" ] && soma "$ping_estado"
 echo "saudavel: ${ok:-nada a verificar}"
 exit 0
