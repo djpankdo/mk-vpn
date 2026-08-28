@@ -1,0 +1,12 @@
+# Backups e exports do RouterOS nunca entram no repositorio: eles carregam
+# hashes de senha de usuario, credenciais da VPN e a passphrase do Wi-Fi, e
+# este repositorio e publico.
+Backups/
+*.backup
+*.rsc
+export*.txt
+
+# Segredos avulsos
+*.key
+*.pem
+.env
