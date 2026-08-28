@@ -41,6 +41,27 @@ else
     exit 1
 fi
 
+# Testa se um IP esta dentro de um prefixo. Uma rota sem "/" e tratada como
+# /32, que e como o vpnc-script instala rotas de host.
+ip2int() {
+    local IFS=. a b c d
+    read -r a b c d <<< "$1"
+    printf '%s' "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
+}
+
+ip_in_cidr() {
+    local ip="$1" alvo="$2" rede bits mask
+    case "$alvo" in
+        */*) rede="${alvo%%/*}"; bits="${alvo##*/}" ;;
+        *)   rede="$alvo";       bits=32 ;;
+    esac
+    case "$bits" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$bits" -gt 32 ] && return 1
+    [ "$bits" -eq 0 ] && return 0
+    mask=$(( 0xFFFFFFFF << (32 - bits) & 0xFFFFFFFF ))
+    [ $(( $(ip2int "$ip") & mask )) -eq $(( $(ip2int "$rede") & mask )) ]
+}
+
 # ---------------------------------------------------------------------------
 # Regra idempotente de iptables
 # ---------------------------------------------------------------------------
@@ -122,6 +143,23 @@ post_connect() {
         else
             log "AVISO: nao consegui excluir $VPNGATEWAY da redistribuicao OSPF"
         fi
+
+        # Negar o /32 nao basta: um prefixo mais amplo que contenha o
+        # concentrador causa o mesmo loop e passa pelo deny do host. Com dois
+        # containers fechando em concentradores diferentes isso deixa de ser
+        # hipotetico, entao varremos o que o tunel instalou.
+        local seq=120 pfx achados=0
+        for pfx in $(ip -4 route show dev "$DEV" 2>/dev/null | awk '{print $1}'); do
+            [ "$pfx" = default ] && continue
+            if ip_in_cidr "$VPNGATEWAY" "$pfx"; then
+                log "AVISO: o prefixo $pfx contem o concentrador $VPNGATEWAY;"
+                log "AVISO: excluindo-o da redistribuicao para evitar loop."
+                vtysh -c 'configure terminal' -c "ip prefix-list exclude_VPNGW seq $seq deny $pfx" >/dev/null 2>&1
+                seq=$((seq + 1))
+                achados=$((achados + 1))
+            fi
+        done
+        [ "$achados" -eq 0 ] && log "nenhum prefixo anunciado contem o concentrador"
     fi
 
     # Resumo, nunca a tabela inteira: um split tunnel corporativo traz centenas

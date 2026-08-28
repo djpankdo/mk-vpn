@@ -255,6 +255,89 @@ Com autenticação (precisa casar com `OSPF_MD5_KEY`/`OSPF_MD5_KEY_ID` no contai
 
 ---
 
+## Dois containers em redundancia
+
+O projeto foi desenhado para rodar **duas instancias simultaneas**, fechando a VPN em
+concentradores diferentes e anunciando as rotas ao mesmo MikroTik. As duas publicam o
+mesmo IP anycast `192.168.192.168/32`; o roteador recebe as rotas por OSPF das duas e faz
+ECMP entre elas.
+
+```
+                     MikroTik
+                  bridge_containers
+                   172.19.0.1
+                    /          \
+         veth-vpn .2            veth_vpn2 .3
+       +------------+          +------------+
+       | VPN_GW_1   |          | VPN_GW_2   |
+       | -> conc. A |          | -> conc. B |
+       | anycast    |          | anycast    |
+       | .192.168   |          | .192.168   |
+       +------------+          +------------+
+```
+
+Cada instancia precisa do **seu proprio** veth, envlist e `root-dir`. O que **deve** ser
+igual nas duas e o `ANYCAST_IP`. O router-id do OSPF nao precisa ser configurado: ele sai
+do IP do veth, que ja e diferente por instancia.
+
+### Segundo container no RouterOS
+
+Reaproveitando a mesma bridge e a mesma rede:
+
+```routeros
+/interface/veth/add name=veth_vpn2 address=172.19.0.3/24 gateway=172.19.0.1
+/interface/bridge/port/add bridge=bridge_containers interface=veth_vpn2
+
+/container/envs/add name=vpn2 key=VPN_SERVER value="https://SEGUNDO-CONCENTRADOR"
+/container/envs/add name=vpn2 key=VPN_USER   value="seu.usuario"
+/container/envs/add name=vpn2 key=VPN_PASS_B64 value="..."
+/container/envs/add name=vpn2 key=VPN_2FA    value="push"
+
+/container/add remote-image=pankdo/mk-vpn:latest interface=veth_vpn2 envlist=vpn2 root-dir=disk1/mk-vpn/root2 hostname=VPN_GW_2 dns=8.8.8.8,1.1.1.1 logging=yes start-on-boot=yes
+```
+
+O `interface-template` de OSPF ja cobre a `bridge_containers`, entao a adjacencia com o
+segundo container se forma sozinha.
+
+### Ativo-ativo ou ativo-standby
+
+Por padrao as duas instancias anunciam com o mesmo custo e o MikroTik balanceia. Para
+preferir uma delas, aumente o custo da outra:
+
+```routeros
+/container/envs/add name=vpn2 key=OSPF_COST value="100"
+```
+
+### Tres pontos de atencao
+
+**Os containers tambem formam adjacencia entre si.** Estando na mesma bridge, cada um
+aprende as rotas do outro por OSPF. Isso e inofensivo: as rotas do proprio tunel entram no
+zebra como `kernel`, com distancia 0, e sempre vencem as aprendidas por OSPF (distancia
+110). Se preferir evitar, coloque cada container numa bridge e num `/30` proprios.
+
+**Uma instancia nao conhece o concentrador da outra.** Cada container exclui da
+redistribuicao o seu proprio gateway VPN e qualquer prefixo que o contenha -- mas nao tem
+como saber o endereco do concentrador da outra instancia. Se o conjunto de rotas anunciado
+por B contiver o concentrador de A, o MikroTik passa a rotear o concentrador de A atraves
+de B, e o tunel de A morre. A protecao definitiva fica no roteador, com rotas estaticas
+mais especificas do que qualquer coisa que o OSPF traga:
+
+```routeros
+/ip/route/add dst-address=CONCENTRADOR-A/32 gateway=SEU-GATEWAY-WAN distance=1
+/ip/route/add dst-address=CONCENTRADOR-B/32 gateway=SEU-GATEWAY-WAN distance=1
+```
+
+**A mesma conta em duas sessoes simultaneas.** Se as duas instancias usarem o mesmo
+`VPN_USER`, o concentrador pode derrubar a primeira sessao quando a segunda conectar. Como
+o servidor bloqueia a conta apos duas falhas de autenticacao, confirme que contas separadas
+(ou sessoes simultaneas) sao permitidas antes de subir as duas.
+
+Com duas instancias, o `stop-on-unhealthy=yes` passa a valer muito mais a pena: a que
+adoecer se retira do OSPF e a outra assume, em vez de as duas continuarem anunciando o
+anycast com uma delas sem tunel.
+
+---
+
 ## Healthcheck
 
 A imagem traz uma instrução `HEALTHCHECK`, que o RouterOS lê e expõe em
