@@ -42,6 +42,10 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 # tentativa. Use-o sempre que mexer em algo que afete a linha do openconnect.
 : "${DRY_RUN:=no}"
 
+# Mascara hexadecimal de 4 digitos que desliga modulos, um por bit. Vazia ou
+# "0000" nao muda nada. O mapa dos bits esta em config_param.sh.
+: "${CONFIG_PARAM:=}"
+
 : "${LAN_ROUTES:=}"            # prefixos que devem voltar pelo gateway do MikroTik
 : "${ENABLE_NAT:=yes}"         # MASQUERADE na saida do tunel
 : "${ENABLE_MSS_CLAMP:=yes}"   # clamp de MSS (evita travar HTTPS por MTU)
@@ -75,7 +79,7 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 
 KNOWN_VARS="VPN_SERVER VPN_USER VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_GROUP
 VPN_PROTOCOL VPN_2FA VPN_FORM_ENTRIES VPN_FINGERPRINT VPN_STRICT_CERT VPN_IFACE
-VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_DEBUG DRY_RUN LAN_ROUTES ENABLE_NAT
+VPN_MTU VPN_EXTRA_ARGS VPN_DEFAULT_ROUTE VPN_DEBUG DRY_RUN CONFIG_PARAM LAN_ROUTES ENABLE_NAT
 ENABLE_MSS_CLAMP ENABLE_SOCKS SOCKS_PORT SOCKS_BIND SOCKS_USER SOCKS_PASS
 ENABLE_SQUID SQUID_PORT PROXY_ALLOW ENABLE_FRR ANYCAST_IP ROUTER_ID
 UPLINK_IFACE ADVERTISE_DEFAULT OSPF_AREA OSPF_COST OSPF_HELLO OSPF_DEAD
@@ -84,6 +88,28 @@ OSPF_RETRANSMIT OSPF_MD5_KEY OSPF_MD5_KEY_ID"
 SECRET_VARS=" VPN_PASS VPN_PASS_B64 VPN_PASS_FILE VPN_2FA VPN_FORM_ENTRIES SOCKS_PASS OSPF_MD5_KEY "
 
 is_yes() { case "${1,,}" in yes|y|true|1|on) return 0 ;; *) return 1 ;; esac; }
+
+# O mesmo decodificador que o healthcheck usa - ver o cabecalho do arquivo para
+# o mapa dos bits e para o porque de ele ser compartilhado.
+. /usr/local/lib/mk-vpn/config_param.sh
+
+# ---------------------------------------------------------------------------
+# 0a. CONFIG_PARAM - a mascara so desliga. Onde existe uma ENABLE_*, o veto e
+#     aplicado nela, para que o resto do script continue consultando uma coisa
+#     so; os modulos sem variavel propria sao consultados com cp_off no ponto
+#     de uso.
+# ---------------------------------------------------------------------------
+apply_config_param() {
+    cp_decode
+    [ -n "$CP_AVISO" ] && warn "$CP_AVISO"
+    if [ "$CP_MASK" -ne 0 ]; then
+        log "CONFIG_PARAM=$CONFIG_PARAM -> $(cp_resumo)"
+    fi
+    cp_off socks && ENABLE_SOCKS=no
+    cp_off squid && ENABLE_SQUID=no
+    cp_off frr   && ENABLE_FRR=no
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # 0. Diagnostico do ambiente - o RouterOS silencia erros de envlist, entao
@@ -369,6 +395,14 @@ start_socks() {
 write_frr_ospf() {
     local iface="$1" rid="$2"
     local ridline="" ifextra="" excl="" redist_conn="" gw n=10
+    # As rotas do tunel entram no OSPF por aqui. Desligar isso deixa o container
+    # anunciando apenas o proprio anycast - util para isolar um loop de
+    # roteamento sem parar o container.
+    local redist_kernel=" redistribute kernel metric-type 1 route-map RMAP_publish_Kernel"
+    if cp_off kernel_routes; then
+        redist_kernel=""
+        log "redistribuicao de rotas kernel desativada por CONFIG_PARAM"
+    fi
 
     [ -n "$rid" ] && ridline=" ospf router-id ${rid}"
 
@@ -421,7 +455,7 @@ router ospf
 ${ridline}
  ospf send-extra-data zebra
  maximum-paths 4
- redistribute kernel metric-type 1 route-map RMAP_publish_Kernel
+${redist_kernel}
 ${redist_conn}
 exit
 !
@@ -739,14 +773,26 @@ trap cleanup TERM INT
 # main
 # ---------------------------------------------------------------------------
 log "mk-vpn iniciando ($(openconnect --version 2>&1 | head -1))"
+apply_config_param
 dump_env
 setup_tun
 setup_forwarding
-setup_anycast
+if cp_off anycast; then
+    log "IP anycast desativado por CONFIG_PARAM"
+else
+    setup_anycast
+fi
 start_socks
 start_squid
 start_frr
 save_original_gateway
+
+if cp_off vpn; then
+    log "VPN desativada por CONFIG_PARAM - o container fica de pe so com os"
+    log "servicos locais, sem contatar o concentrador."
+    idle_forever
+    exit 0
+fi
 
 if [ -z "$VPN_SERVER" ] || [ -z "$VPN_USER" ]; then
     warn "VPN_SERVER e/ou VPN_USER ausentes - a VPN nao sera conectada."
@@ -765,6 +811,13 @@ SERVERCERT=""
 if [ -n "$VPN_FINGERPRINT" ]; then
     SERVERCERT="$VPN_FINGERPRINT"
     log "usando VPN_FINGERPRINT informado: $SERVERCERT"
+elif cp_off cert_probe; then
+    # Sem a sonda nao ha pin a adotar: a validacao fica inteiramente por conta
+    # das CAs do sistema. Se o concentrador usar CA privada, a conexao vai
+    # falhar - e o jeito de resolver e gravar VPN_FINGERPRINT.
+    warn "sonda do certificado desativada por CONFIG_PARAM; a validacao ficara"
+    warn "por conta das CAs do sistema. Com CA privada, grave VPN_FINGERPRINT."
+    SERVERCERT=""
 else
     log "sondando o certificado de $(vpn_hostport) com openssl (sem falar o"
     log "protocolo da VPN, portanto sem gastar tentativa de autenticacao)..."

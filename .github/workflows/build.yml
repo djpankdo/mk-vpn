@@ -27,6 +27,8 @@ jobs:
           bash -n rootfs/usr/local/bin/entrypoint.sh
           bash -n rootfs/usr/local/bin/vpnc-hook.sh
           bash -n rootfs/usr/local/bin/mkvpn-status.sh
+          bash -n rootfs/usr/local/bin/healthcheck.sh
+          bash -n rootfs/usr/local/lib/mk-vpn/config_param.sh
 
       # O nome da imagem nao pode depender do segredo: sem ele a tag sairia
       # vazia e o metadata-action falharia mesmo num build sem publicacao.

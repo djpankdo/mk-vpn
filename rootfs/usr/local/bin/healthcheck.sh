@@ -30,6 +30,17 @@ set -u
 
 is_yes() { case "${1,,}" in yes|y|true|1|on) return 0 ;; *) return 1 ;; esac; }
 
+# O mesmo decodificador do entrypoint. Sem isto, um modulo desligado por
+# CONFIG_PARAM continuaria sendo cobrado aqui, o container ficaria "unhealthy"
+# e, com stop-on-unhealthy, o RouterOS o pararia: desligar um modulo derrubaria
+# o container inteiro. O aviso de valor malformado nao e impresso aqui - o
+# entrypoint ja o registra no boot, e a saida do healthcheck e uma linha so.
+. /usr/local/lib/mk-vpn/config_param.sh
+cp_decode
+cp_off socks && ENABLE_SOCKS=no
+cp_off squid && ENABLE_SQUID=no
+cp_off frr   && ENABLE_FRR=no
+
 problemas=""
 anota() { problemas="${problemas}${problemas:+; }$1"; }
 
@@ -51,7 +62,7 @@ porta_escutando() {
 }
 
 # --- IP anycast do servico -------------------------------------------------
-if [ -n "$ANYCAST_IP" ]; then
+if [ -n "$ANYCAST_IP" ] && ! cp_off anycast; then
     if ! ip -4 addr show dev lo 2>/dev/null | grep -qF " ${ANYCAST_IP%%/*}/"; then
         anota "IP anycast ${ANYCAST_IP} ausente da loopback"
     fi
@@ -81,7 +92,7 @@ fi
 
 # --- VPN -------------------------------------------------------------------
 # Em DRY_RUN a VPN nao sobe de proposito; cobrar isso seria falso negativo.
-if is_yes "$DRY_RUN"; then
+if is_yes "$DRY_RUN" || cp_off vpn; then
     :
 elif [ -n "$VPN_SERVER" ]; then
     if ! pgrep -x openconnect >/dev/null 2>&1; then
@@ -102,7 +113,7 @@ fi
 # Escolha alvos que so existam do lado corporativo; um IP alcancavel pela WAN
 # responderia mesmo com o tunel morto e o teste nao valeria nada.
 ping_estado=""
-if is_yes "$DRY_RUN"; then
+if is_yes "$DRY_RUN" || cp_off vpn || cp_off hc_ping; then
     ping_estado=""
 elif [ -n "$VPN_PING_TARGETS" ]; then
     alvos=""
@@ -137,11 +148,13 @@ fi
 # componente desligado por configuracao esta de pe.
 ok=""
 soma() { ok="${ok}${ok:+, }$1"; }
-[ -n "$ANYCAST_IP" ] && soma "anycast ${ANYCAST_IP%%/*}"
+[ -n "$ANYCAST_IP" ] && ! cp_off anycast && soma "anycast ${ANYCAST_IP%%/*}"
 is_yes "$ENABLE_SQUID" && soma "squid:${SQUID_PORT}"
 is_yes "$ENABLE_SOCKS" && soma "socks:${SOCKS_PORT}"
 is_yes "$ENABLE_FRR"   && soma "OSPF adjacente"
-if is_yes "$DRY_RUN"; then
+if cp_off vpn; then
+    soma "VPN desativada (CONFIG_PARAM)"
+elif is_yes "$DRY_RUN"; then
     soma "VPN nao conectada (DRY_RUN)"
 elif [ -n "$VPN_SERVER" ]; then
     soma "VPN em ${VPN_IFACE}"

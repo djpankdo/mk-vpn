@@ -19,6 +19,7 @@
 !/rootfs/usr/local/bin/healthcheck.sh
 !/rootfs/usr/local/bin/mkvpn-status.sh
 !/rootfs/usr/local/bin/vpnc-hook.sh
+!/rootfs/usr/local/lib/mk-vpn/config_param.sh
 
 # --- nunca, mesmo que alguem libere por engano la em cima ---
 # Backups e exports do RouterOS carregam hash de senha de usuario, credenciais

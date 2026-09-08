@@ -95,6 +95,52 @@ cada conexão. Com `VPN_STRICT_CERT=yes` o container recusa conectar até que vo
 | `VPN_DEFAULT_ROUTE` | `no` | `yes` = o túnel fica com a rota default do container (full tunnel). Exige `LAN_ROUTES`. |
 | `VPN_DEBUG` | `no` | `yes` acrescenta `--dump-http-traffic`. **Cuidado:** isso despeja o tráfego HTTP da autenticação no log do RouterOS, credenciais inclusive. |
 | `DRY_RUN` | `no` | `yes` faz todo o boot mas **não** executa o openconnect: apenas registra no log o comando que seria executado, e mantém o container de pé para inspeção. |
+| `CONFIG_PARAM` | — | Máscara hexadecimal de 4 dígitos que desliga módulos, um por bit. Veja abaixo. |
+
+### `CONFIG_PARAM`: desligar módulos por máscara de bits
+
+A envlist do RouterOS é desconfortável de manter — cada chave é um
+`/container/envs/add` separado. `CONFIG_PARAM` junta os interruptores numa variável só:
+quatro dígitos hexadecimais, um bit por módulo.
+
+**Bit em 1 desliga. Bit em 0 não liga nada** — deixa a `ENABLE_*` correspondente decidir,
+como sempre. A máscara é um veto, nunca um interruptor de ligar, então `CONFIG_PARAM`
+ausente ou `0000` é exatamente o comportamento de quem nunca ouviu falar dela.
+
+| Bit | Hex | Desliga |
+|---|---|---|
+| 0 | `0001` | microsocks |
+| 1 | `0002` | Squid |
+| 2 | `0004` | FRR/OSPF |
+| 3 | `0008` | IP anycast na loopback |
+| 4 | `0010` | VPN (openconnect) — o container fica de pé só com os serviços locais |
+| 5 | `0020` | sonda do certificado no boot |
+| 6 | `0040` | redistribuição das rotas *kernel* no OSPF — anuncia só o anycast |
+| 7 | `0080` | teste de ping do healthcheck |
+| 8–15 | | reservados |
+
+Some os hexadecimais para combinar: `0006` desliga Squid e FRR, `0011` desliga microsocks e
+VPN. O boot registra a decodificação em palavras, para o valor não ser um enigma no log:
+
+```
+CONFIG_PARAM=0006 -> desativados: squid frr
+```
+
+Valor malformado é **ignorado com aviso**, nunca tratado como erro fatal — derrubar um
+container por causa de um dígito errado seria pior. Bits reservados também só geram aviso.
+
+O `healthcheck.sh` lê a mesma máscara, e isso não é detalhe: sem essa parte, um módulo
+desligado continuaria sendo cobrado pelo healthcheck, o container ficaria *unhealthy* e,
+com `stop-on-unhealthy=yes`, o RouterOS o **pararia**. O decodificador vive em
+`/usr/local/lib/mk-vpn/config_param.sh` justamente para servir aos dois.
+
+Três coisas **não** têm bit, por decisão de projeto: a interface TUN, o NAT na saída do
+túnel e o clamp de MSS. Sem TUN não há VPN, sem NAT o tráfego que sai pelo túnel não volta,
+e sem o clamp o HTTPS trava por MTU.
+
+> O significado de cada bit é congelado. Módulo novo entra no fim da lista; módulo
+> aposentado deixa o nome no lugar em vez de sair, para não deslocar os demais — quem já
+> gravou `CONFIG_PARAM` no roteador espera a mesma coisa depois de atualizar a imagem.
 
 ### Roteamento
 
