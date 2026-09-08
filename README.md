@@ -253,12 +253,12 @@ Ajuste `disk1` para o nome do seu storage e `172.19.0.0/24` para a rede que pref
 /container/config/set registry-url=https://registry-1.docker.io \
     tmpdir=disk1/pull layer-dir=disk1/layers
 
-/container/envs/add name=vpn key=VPN_SERVER   value="vpn.suaempresa.com"
-/container/envs/add name=vpn key=VPN_USER     value="seu.usuario"
-/container/envs/add name=vpn key=VPN_PASS_B64 value="c3VhLXNlbmhh"
-/container/envs/add name=vpn key=VPN_GROUP    value="SEU-GRUPO"
+/container/envs/add list=vpn key=VPN_SERVER   value="vpn.suaempresa.com"
+/container/envs/add list=vpn key=VPN_USER     value="seu.usuario"
+/container/envs/add list=vpn key=VPN_PASS_B64 value="c3VhLXNlbmhh"
+/container/envs/add list=vpn key=VPN_GROUP    value="SEU-GRUPO"
 # na primeira vez, valide sem gastar tentativa de autenticação:
-/container/envs/add name=vpn key=DRY_RUN value="yes"
+/container/envs/add list=vpn key=DRY_RUN value="yes"
 ```
 
 > **Senha:** gere o base64 **sem** quebra de linha —
@@ -275,7 +275,7 @@ sobre `/etc/frr` ou `/etc/squid` seria sobrescrito.
 ```routeros
 /container/add remote-image=SEUUSUARIO/mk-vpn:latest \
     interface=veth-vpn \
-    envlist=vpn \
+    envlists=vpn \
     root-dir=disk1/mk-vpn/root \
     logging=yes \
     start-on-boot=yes
@@ -345,7 +345,7 @@ Reaproveitando a mesma bridge e a mesma rede:
 /container/envs/add name=vpn2 key=VPN_PASS_B64 value="..."
 /container/envs/add name=vpn2 key=VPN_2FA    value="push"
 
-/container/add remote-image=pankdo/mk-vpn:latest interface=veth_vpn2 envlist=vpn2 root-dir=disk1/mk-vpn/root2 hostname=VPN_GW_2 dns=8.8.8.8,1.1.1.1 logging=yes start-on-boot=yes
+/container/add remote-image=pankdo/mk-vpn:latest interface=veth_vpn2 envlists=vpn2 root-dir=disk1/mk-vpn/root2 hostname=VPN_GW_2 dns=8.8.8.8,1.1.1.1 logging=yes start-on-boot=yes
 ```
 
 O `interface-template` de OSPF ja cobre a `bridge_containers`, entao a adjacencia com o
