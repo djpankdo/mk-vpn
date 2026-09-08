@@ -54,7 +54,9 @@ shutting_down() { [ -e "$SHUTDOWN_FLAG" ]; }
 
 : "${ENABLE_SQUID:=yes}"
 : "${SQUID_PORT:=3128}"
-: "${PROXY_ALLOW:=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}"
+# Vazio de proposito: o Squid atende qualquer origem. Quem filtra o acesso ao
+# proxy e o firewall do MikroTik. Preencher esta variavel volta a restringir.
+: "${PROXY_ALLOW:=}"
 
 : "${ENABLE_FRR:=yes}"
 : "${ANYCAST_IP:=192.168.192.168/32}"  # IP de servico na loopback, anunciado por OSPF
@@ -290,26 +292,45 @@ start_squid() {
     # Configuracao efemera: regerada a todo boot. O mesmo container roda em
     # redes diferentes, entao nada aqui pode ficar preso a um IP da rede
     # anterior - e o root-dir do RouterOS persiste entre reinicios.
+    # Com PROXY_ALLOW vazio (o padrao) o proxy nao filtra origem nenhuma. Se a
+    # variavel for preenchida, as sub-redes conectadas entram na lista junto,
+    # para que o container continue atendendo a LAN ao mudar de rede.
     local nets="$PROXY_ALLOW"
     local n outer
-    for n in $(ip -4 route show scope link proto kernel 2>/dev/null | awk '{print $1}'); do
-        # O Squid ignora (e reclama de) uma ACL contida em outra ja listada,
-        # entao so acrescenta a sub-rede se ela ainda nao estiver coberta.
-        for outer in $nets; do
-            cidr_covers "$outer" "$n" && continue 2
+    if [ -n "$nets" ]; then
+        for n in $(ip -4 route show scope link proto kernel 2>/dev/null | awk '{print $1}'); do
+            # O Squid ignora (e reclama de) uma ACL contida em outra ja listada,
+            # entao so acrescenta a sub-rede se ela ainda nao estiver coberta.
+            for outer in $nets; do
+                cidr_covers "$outer" "$n" && continue 2
+            done
+            nets="$nets $n"
         done
-        nets="$nets $n"
-    done
+    fi
 
     {
         echo "# mk-vpn managed - regerado a cada boot; nao edite dentro do container."
-        for net in $nets; do
-            echo "acl mkvpn_clients src $net"
-        done
         cat /etc/mk-vpn/squid.conf.tmpl
+        # As regras de acesso vem depois do gabarito porque o Squid avalia
+        # http_access na ordem em que aparece, e a decisao final tem de ser a
+        # ultima linha.
+        if [ -n "$nets" ]; then
+            for net in $nets; do
+                echo "acl mkvpn_clients src $net"
+            done
+            echo "http_access allow localhost"
+            echo "http_access allow mkvpn_clients"
+            echo "http_access deny all"
+        else
+            echo "http_access allow all"
+        fi
         echo "http_port $SQUID_PORT"
     } > /etc/squid/squid.conf
-    log "squid.conf gerado (porta $SQUID_PORT, redes permitidas:$(printf ' %s' $nets))"
+    if [ -n "$nets" ]; then
+        log "squid.conf gerado (porta $SQUID_PORT, redes permitidas:$(printf ' %s' $nets))"
+    else
+        log "squid.conf gerado (porta $SQUID_PORT, aberto a qualquer origem e a qualquer porta de destino)"
+    fi
 
     if ! squid -k parse -f /etc/squid/squid.conf >/dev/null 2>&1; then
         err "squid.conf invalido:"

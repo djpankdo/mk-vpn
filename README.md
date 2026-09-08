@@ -114,7 +114,13 @@ cada conexão. Com `VPN_STRICT_CERT=yes` o container recusa conectar até que vo
 | `SOCKS_USER` / `SOCKS_PASS` | — | Autenticação do microsocks. Sem elas o proxy é aberto. |
 | `ENABLE_SQUID` | `yes` | |
 | `SQUID_PORT` | `3128` | |
-| `PROXY_ALLOW` | `10.0.0.0/8 172.16.0.0/12 192.168.0.0/16` | Redes autorizadas no Squid. As sub-redes conectadas do próprio container são acrescentadas automaticamente, então normalmente não há o que ajustar ao mudar de rede. |
+| `PROXY_ALLOW` | — (vazio: qualquer origem) | Restrição **opcional** de origem no Squid. Vazio, o proxy atende qualquer IP. Preenchida, só as redes listadas passam — e as sub-redes conectadas do próprio container são acrescentadas automaticamente, para o container seguir funcionando ao mudar de rede. |
+
+O Squid é gerado **sem restrição de porta de destino**. As ACLs `Safe_ports` e `SSL_ports`
+que vêm no exemplo do Squid só deixam o `CONNECT` chegar na 443 e recusam HTTP simples
+abaixo da 1025 — o que derruba qualquer aplicação web servida em porta fora do comum
+(`https://host:8443`, por exemplo). Como esse é justamente o tipo de destino que este proxy
+precisa alcançar, essas ACLs não existem aqui.
 
 ### OSPF (FRR)
 
@@ -451,9 +457,11 @@ docker buildx build --platform linux/arm64 -t SEUUSUARIO/mk-vpn:latest --push .
 
 ## Segurança
 
-- microsocks e Squid escutam em `0.0.0.0` dentro do container. Restrinja o acesso pelo
-  firewall do MikroTik e/ou use `SOCKS_USER`/`SOCKS_PASS` e `PROXY_ALLOW`. Um proxy aberto
-  aqui é uma porta de entrada para a rede corporativa.
+- microsocks e Squid escutam em `0.0.0.0` dentro do container, e **os dois são abertos por
+  padrão**: o microsocks sem autenticação, e o Squid sem restrição de origem nem de porta de
+  destino. Isso é deliberado — o filtro de quem alcança os proxies é o firewall do MikroTik.
+  Se quiser fechar no próprio container, use `SOCKS_USER`/`SOCKS_PASS` e `PROXY_ALLOW`. Um
+  proxy aberto aqui é uma porta de entrada para a rede corporativa.
 - Prefira `VPN_PASS_FILE` a `VPN_PASS`/`VPN_PASS_B64`: variáveis de ambiente aparecem em
   `/container/envs/print` e no ambiente de qualquer processo do container. Base64 não é
   criptografia.
