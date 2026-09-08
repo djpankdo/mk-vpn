@@ -29,13 +29,13 @@ LAN 192.168.88.0/24
    ┌────┴─────────────────────────────┐
    │ MikroTik (RouterOS v7)           │
    │                                  │
-   │  bridge containers 172.19.0.1/24 │
+   │  bridge containers 172.19.0.1/29 │
    │        │                         │
    │        │  OSPF area 0.0.0.0       │  ← o container anuncia as redes da VPN
    │        │                         │
    │   ┌────┴──────────────────────┐  │
    │   │ container mk-vpn          │  │
-   │   │  veth 172.19.0.2/24       │  │
+   │   │  veth 172.19.0.2/29       │  │
    │   │  ├ openconnect → tun0 ────┼──┼──→ concentrador VPN
    │   │  ├ FRR (ospfd + zebra)    │  │
    │   │  ├ microsocks :1080       │  │
@@ -229,18 +229,23 @@ dentro do container não adianta, eles são sobrescritos.
 
 ## Configuração no RouterOS
 
-Ajuste `disk1` para o nome do seu storage e `172.19.0.0/24` para a rede que preferir.
+Ajuste `disk1` para o nome do seu storage e `172.19.0.0/29` para a rede que preferir.
+
+A rede de transporte e um **/29**: ela so precisa acomodar o roteador e os containers do
+equipamento, e um bloco maior desperdicaria enderecos num dominio OSPF que ja carrega
+centenas de prefixos. Os seis enderecos utilizaveis cobrem o roteador e as duas instancias
+previstas com folga.
 
 ### 1. Rede do container
 
 ```routeros
-/interface/veth/add name=veth-vpn address=172.19.0.2/24 gateway=172.19.0.1
+/interface/veth/add name=veth-vpn address=172.19.0.2/29 gateway=172.19.0.1
 /interface/bridge/add name=containers
 /interface/bridge/port/add bridge=containers interface=veth-vpn
-/ip/address/add address=172.19.0.1/24 interface=containers
+/ip/address/add address=172.19.0.1/29 interface=containers
 
 # saída para a internet do próprio container (para ele alcançar o concentrador)
-/ip/firewall/nat/add chain=srcnat action=masquerade src-address=172.19.0.0/24
+/ip/firewall/nat/add chain=srcnat action=masquerade src-address=172.19.0.0/29
 
 # a LAN precisa alcançar os proxies do container
 /ip/firewall/filter/add chain=forward action=accept \
@@ -337,13 +342,13 @@ do IP do veth, que ja e diferente por instancia.
 Reaproveitando a mesma bridge e a mesma rede:
 
 ```routeros
-/interface/veth/add name=veth_vpn2 address=172.19.0.3/24 gateway=172.19.0.1
+/interface/veth/add name=veth_vpn2 address=172.19.0.3/29 gateway=172.19.0.1
 /interface/bridge/port/add bridge=bridge_containers interface=veth_vpn2
 
-/container/envs/add name=vpn2 key=VPN_SERVER value="https://SEGUNDO-CONCENTRADOR"
-/container/envs/add name=vpn2 key=VPN_USER   value="seu.usuario"
-/container/envs/add name=vpn2 key=VPN_PASS_B64 value="..."
-/container/envs/add name=vpn2 key=VPN_2FA    value="push"
+/container/envs/add list=vpn2 key=VPN_SERVER value="https://SEGUNDO-CONCENTRADOR"
+/container/envs/add list=vpn2 key=VPN_USER   value="seu.usuario"
+/container/envs/add list=vpn2 key=VPN_PASS_B64 value="..."
+/container/envs/add list=vpn2 key=VPN_2FA    value="push"
 
 /container/add remote-image=pankdo/mk-vpn:latest interface=veth_vpn2 envlists=vpn2 root-dir=disk1/mk-vpn/root2 hostname=VPN_GW_2 dns=8.8.8.8,1.1.1.1 logging=yes start-on-boot=yes
 ```
@@ -357,7 +362,7 @@ Por padrao as duas instancias anunciam com o mesmo custo e o MikroTik balanceia.
 preferir uma delas, aumente o custo da outra:
 
 ```routeros
-/container/envs/add name=vpn2 key=OSPF_COST value="100"
+/container/envs/add list=vpn2 key=OSPF_COST value="100"
 ```
 
 ### Tres pontos de atencao
