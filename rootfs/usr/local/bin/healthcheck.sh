@@ -147,20 +147,19 @@ elif [ -n "$VPN_PING_TARGETS" ]; then
 fi
 
 # --- telemetria para o ramo roteadores/ ------------------------------------
-# Uma linha JSON no stdout. O RouterOS a captura no log em memoria, e um script
-# de la a repassa ao MQTT acrescentando quem e o roteador e o container -- os
-# dois unicos dados que o container nao tem como saber sobre si mesmo.
+# Uma linha JSON no stdout, que um script do roteador repassa ao MQTT
+# acrescentando quem e o roteador e o container -- os dois unicos dados que o
+# container nao tem como saber sobre si mesmo.
 #
-# A cadencia e definida sem guardar estado: o healthcheck e um processo novo a
-# cada 30s e nao lembra da execucao anterior. Emitir sempre encheria o buffer de
-# log do roteador (1000 linhas) em poucas horas, entao emite-se numa janela de
-# 30s a cada 5 minutos -- e sempre que houver problema, porque ai a informacao
-# vale mais que o espaco.
-emitir=no
-[ $(( $(date +%s) % 300 )) -lt 30 ] && emitir=sim
-[ -n "$problemas" ] && emitir=sim
-
-if [ "$emitir" = sim ]; then
+# A saida deste script NAO vai para o log do container: o RouterOS a captura na
+# propriedade "healthcheck-status" do proprio container, que o script do
+# roteador le direto. Isso e melhor que passar pelo log por tres motivos -- nao
+# consome o buffer de 1000 linhas, nao corre risco de truncamento de mensagem, e
+# o valor lido e sempre o da ultima execucao, nunca um residuo antigo.
+#
+# Por isso a linha e emitida em TODA execucao: como o status e sobrescrito a
+# cada vez, nao ha acumulo a economizar.
+if true; then
     estado=desconectado
     if is_yes "$DRY_RUN"; then
         estado=dry-run
