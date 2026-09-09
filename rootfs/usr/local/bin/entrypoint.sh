@@ -193,11 +193,42 @@ setup_forwarding() {
 # ---------------------------------------------------------------------------
 # 3. Senha
 # ---------------------------------------------------------------------------
+# Remove do fim da senha qualquer combinacao de CR e LF, em qualquer quantidade.
+# Senha nao termina em quebra de linha: o que aparece ali e sempre residuo de
+# como o valor foi produzido -- "echo | base64" acrescenta LF, um arquivo salvo
+# no Windows acrescenta CRLF, e um copiar-e-colar traz o que vier junto. A
+# substituicao de comando do shell ja descarta LF final, mas o CR sobrevive e e
+# invisivel: a autenticacao falha com mensagem generica e ninguem ve o motivo.
+#
+# Espaco e tabulacao NAO sao removidos: ao contrario da quebra de linha, podem
+# fazer parte de uma senha legitima. Nesse caso o log avisa e a pessoa decide.
+tirar_quebras_do_fim() {   # $1 = nome da variavel a limpar
+    local nome="$1" v="${!1}" removidos=0
+    while [ -n "$v" ]; do
+        case "${v: -1}" in
+            $'\r'|$'\n') v="${v%?}"; removidos=$((removidos + 1)) ;;
+            *) break ;;
+        esac
+    done
+    if [ "$removidos" -gt 0 ]; then
+        warn "$nome terminava em $removidos caractere(s) de quebra de linha,"
+        warn "removidos antes de usar. Para nao repetir, gere o base64 assim:"
+        warn "    printf '%s' 'sua-senha' | base64"
+    fi
+    case "${v: -1}" in
+        ' '|$'\t')
+            warn "$nome termina em espaco ou tabulacao. Isso NAO foi removido,"
+            warn "porque pode fazer parte da senha - confira com DRY_RUN=yes." ;;
+    esac
+    printf -v "$nome" '%s' "$v"
+}
+
 resolve_password() {
     REAL_PASS=""
     if [ -n "$VPN_PASS_FILE" ]; then
         if [ -r "$VPN_PASS_FILE" ]; then
             REAL_PASS=$(head -n1 "$VPN_PASS_FILE")
+            tirar_quebras_do_fim REAL_PASS
             log "senha lida de $VPN_PASS_FILE (${#REAL_PASS} caracteres)"
         else
             err "VPN_PASS_FILE=$VPN_PASS_FILE nao existe ou nao e legivel"
@@ -208,12 +239,11 @@ resolve_password() {
             err "VPN_PASS_B64 nao e base64 valido"
             return 1
         fi
-        # A substituicao de comando ja descarta quebras de linha finais; esta linha e
-        # defensiva. Um espaco no fim, porem, sobrevive - e o hexdump do DRY_RUN o mostra.
-        REAL_PASS=${REAL_PASS%$'\n'}
+        tirar_quebras_do_fim REAL_PASS
         log "senha decodificada de VPN_PASS_B64 (${#REAL_PASS} caracteres)"
     elif [ -n "$VPN_PASS" ]; then
         REAL_PASS="$VPN_PASS"
+        tirar_quebras_do_fim REAL_PASS
         log "senha lida de VPN_PASS (${#REAL_PASS} caracteres)"
     else
         err "nenhuma senha informada (use VPN_PASS, VPN_PASS_B64 ou VPN_PASS_FILE)"
