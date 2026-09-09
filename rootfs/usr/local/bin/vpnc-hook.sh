@@ -63,17 +63,55 @@ ip_in_cidr() {
 }
 
 # ---------------------------------------------------------------------------
+# Backend do iptables: escolhido em tempo de execucao
+#
+# O Debian aponta o "iptables" para o backend nf_tables, e o kernel do RouterOS
+# em parte dos equipamentos nao expoe essa API. O sintoma e cruel porque nao
+# derruba nada: o openconnect conecta, as rotas entram, o tunel parece bom, e o
+# iptables apenas reclama
+#
+#     iptables (nf_tables): Could not fetch rule set generation id
+#     Warning: Extension MASQUERADE revision 0 not supported
+#
+# sem criar regra nenhuma. Quem so olha o tunel subir nao percebe; quem tenta
+# rotear trafego pela LAN descobre depois, porque o retorno nao volta sem o
+# MASQUERADE.
+#
+# A mesma imagem roda em kernels dos dois tipos, entao a escolha nao pode ser
+# fixada na construcao: aqui se testa qual backend responde de fato, uma vez, e
+# usa-se esse. A ordem do teste privilegia o padrao da distribuicao.
+# ---------------------------------------------------------------------------
+IPT=""
+escolher_iptables() {
+    [ -n "$IPT" ] && return 0
+    local cand
+    for cand in iptables iptables-legacy iptables-nft; do
+        command -v "$cand" >/dev/null 2>&1 || continue
+        if "$cand" -t nat -L -n >/dev/null 2>&1; then
+            IPT="$cand"
+            log "backend de iptables: $cand ($("$cand" --version 2>/dev/null | head -1))"
+            return 0
+        fi
+    done
+    IPT=iptables
+    log "AVISO: nenhum backend de iptables respondeu; NAT e clamp de MSS nao serao aplicados"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Regra idempotente de iptables
 # ---------------------------------------------------------------------------
 ipt_ensure() {
     local table="$1"; shift
-    iptables -t "$table" -C "$@" 2>/dev/null || iptables -t "$table" -A "$@"
+    escolher_iptables
+    "$IPT" -t "$table" -C "$@" 2>/dev/null || "$IPT" -t "$table" -A "$@"
 }
 
 ipt_remove() {
     local table="$1"; shift
-    while iptables -t "$table" -C "$@" 2>/dev/null; do
-        iptables -t "$table" -D "$@" || break
+    escolher_iptables
+    while "$IPT" -t "$table" -C "$@" 2>/dev/null; do
+        "$IPT" -t "$table" -D "$@" || break
     done
 }
 
@@ -171,7 +209,8 @@ post_connect() {
     log "rotas instaladas: $n_tun via $DEV, $n_total no total"
     log "amostra: $(ip route show dev "$DEV" 2>/dev/null | head -3 | awk '{printf "%s ", $1}')"
     log "default: $(ip route show default 2>/dev/null | head -1)"
-    log "NAT: $(iptables -t nat -S POSTROUTING 2>/dev/null | grep -c MASQUERADE) regra(s) MASQUERADE; MSS: $(iptables -t mangle -S 2>/dev/null | grep -c TCPMSS) regra(s) TCPMSS"
+    escolher_iptables
+    log "NAT: $("$IPT" -t nat -S POSTROUTING 2>/dev/null | grep -c MASQUERADE) regra(s) MASQUERADE; MSS: $("$IPT" -t mangle -S 2>/dev/null | grep -c TCPMSS) regra(s) TCPMSS"
     log "para a tabela completa use: /container/shell -> mkvpn-status.sh"
 }
 

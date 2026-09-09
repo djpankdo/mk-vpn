@@ -14,11 +14,18 @@ ip -br addr show
 sec "rotas"
 ip route show
 
-sec "iptables nat"
-iptables -t nat -S 2>/dev/null
+# Mesmo criterio do hook: usa o backend que responde neste kernel.
+IPT=iptables
+for c in iptables iptables-legacy iptables-nft; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" -t nat -L -n >/dev/null 2>&1 && { IPT="$c"; break; }
+done
 
-sec "iptables mangle"
-iptables -t mangle -S 2>/dev/null
+sec "iptables nat ($IPT)"
+"$IPT" -t nat -S 2>/dev/null
+
+sec "iptables mangle ($IPT)"
+"$IPT" -t mangle -S 2>/dev/null
 
 sec "ip_forward"
 cat /proc/sys/net/ipv4/ip_forward 2>/dev/null
