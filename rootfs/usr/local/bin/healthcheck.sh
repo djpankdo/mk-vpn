@@ -24,6 +24,14 @@ set -u
 # Lista de IPv4 separados por espaco. Sem valor, ou sem nenhum IPv4 valido, o
 # teste fica desabilitado -- nunca tratado como falha: derrubar um tunel que
 # funciona por causa de um erro de digitacao seria pior do que nao testar.
+: "${VPN_USER:=}"
+: "${CONFIG_PARAM:=}"
+# Minutos de ociosidade que o concentrador tolera antes de derrubar a sessao.
+# Nao ha como descobrir sozinho: o openconnect interpreta o cabecalho
+# X-CSTP-Idle-Timeout mas nao o imprime na verbosidade padrao. Vazio = a
+# telemetria publica "expira_se_ocioso" como desconhecido, em vez de inventar.
+: "${VPN_IDLE_MIN:=}"
+
 : "${VPN_PING_TARGETS:=}"
 : "${VPN_PING_COUNT:=2}"
 : "${VPN_PING_DEADLINE:=2}"
@@ -136,6 +144,53 @@ elif [ -n "$VPN_PING_TARGETS" ]; then
             anota "nenhum alvo respondeu ao ping pelo tunel ($alvos )"
         fi
     fi
+fi
+
+# --- telemetria para o ramo roteadores/ ------------------------------------
+# Uma linha JSON no stdout. O RouterOS a captura no log em memoria, e um script
+# de la a repassa ao MQTT acrescentando quem e o roteador e o container -- os
+# dois unicos dados que o container nao tem como saber sobre si mesmo.
+#
+# A cadencia e definida sem guardar estado: o healthcheck e um processo novo a
+# cada 30s e nao lembra da execucao anterior. Emitir sempre encheria o buffer de
+# log do roteador (1000 linhas) em poucas horas, entao emite-se numa janela de
+# 30s a cada 5 minutos -- e sempre que houver problema, porque ai a informacao
+# vale mais que o espaco.
+emitir=no
+[ $(( $(date +%s) % 300 )) -lt 30 ] && emitir=sim
+[ -n "$problemas" ] && emitir=sim
+
+if [ "$emitir" = sim ]; then
+    estado=desconectado
+    if is_yes "$DRY_RUN"; then
+        estado=dry-run
+    elif cp_off vpn; then
+        estado=vpn-desativada
+    elif [ -z "$VPN_SERVER" ]; then
+        estado=sem-servidor
+    elif ip -4 addr show dev "$VPN_IFACE" 2>/dev/null | grep -q 'inet '; then
+        estado=conectado
+    fi
+
+    tun_ip=$(ip -4 -br addr show dev "$VPN_IFACE" 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
+    veth_ip=$(ip -4 -br addr show 2>/dev/null | awk '$1!="lo" && $1!="'"$VPN_IFACE"'" && $3 ~ /\// {print $3; exit}' | cut -d/ -f1)
+    gw=$(cat /run/mk-vpn/vpn-gw 2>/dev/null)
+    desde=$(cat /run/mk-vpn/vpn-desde 2>/dev/null)
+    rotas=$(cat /run/mk-vpn/vpn-rotas 2>/dev/null)
+    [ -n "$rotas" ] || rotas=0
+    vizinhos=0
+    if is_yes "$ENABLE_FRR" && command -v vtysh >/dev/null 2>&1; then
+        vizinhos=$(timeout 5 vtysh -c 'show ip ospf neighbor' 2>/dev/null | grep -ci 'full')
+    fi
+    expira=""
+    if [ "$estado" = conectado ] && [ -n "$VPN_IDLE_MIN" ]; then
+        expira=$(date -u -d "+${VPN_IDLE_MIN} minutes" +%FT%TZ 2>/dev/null)
+    fi
+    veredito=saudavel
+    [ -n "$problemas" ] && veredito="$problemas"
+
+    printf 'MKVPN {"st":"%s","user":"%s","srv":"%s","gw":"%s","tun":"%s","veth":"%s","desde":"%s","expira_se_ocioso":"%s","rotas":%s,"ospf":%s,"ping":"%s","host":"%s","cfg":"%s","diag":"%s","ts":"%s"}
+'        "$estado" "$VPN_USER" "$VPN_SERVER" "$gw" "$tun_ip" "$veth_ip" "$desde" "$expira"         "$rotas" "$vizinhos" "${ping_estado:-}" "$(hostname)" "$CONFIG_PARAM"         "$(printf '%s' "$veredito" | tr '"' "'" | cut -c1-80)" "$(date -u +%FT%TZ)"
 fi
 
 # --- veredito --------------------------------------------------------------

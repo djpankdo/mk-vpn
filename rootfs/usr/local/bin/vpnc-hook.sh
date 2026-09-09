@@ -212,10 +212,21 @@ post_connect() {
     escolher_iptables
     log "NAT: $("$IPT" -t nat -S POSTROUTING 2>/dev/null | grep -c MASQUERADE) regra(s) MASQUERADE; MSS: $("$IPT" -t mangle -S 2>/dev/null | grep -c TCPMSS) regra(s) TCPMSS"
     log "para a tabela completa use: /container/shell -> mkvpn-status.sh"
+
+    # Estado da conexao para o healthcheck montar a telemetria. Sao tres
+    # escritas por conexao, nao um laco: o hook so roda quando o tunel sobe ou
+    # cai, e sem isto o healthcheck nao teria como saber a hora em que a sessao
+    # comecou nem qual concentrador atendeu de fato.
+    printf '%s' "${VPNGATEWAY:-}"         > "$RUNDIR/vpn-gw"
+    printf '%s' "$(date -u +%FT%TZ)"      > "$RUNDIR/vpn-desde"
+    printf '%s' "$n_tun"                  > "$RUNDIR/vpn-rotas"
 }
 
 post_disconnect() {
     log "tunel $DEV encerrado (reason=$reason); limpando regras"
+    # Some com o estado: telemetria de tunel morto e pior que telemetria
+    # ausente, porque parece boa.
+    rm -f "$RUNDIR/vpn-gw" "$RUNDIR/vpn-desde" "$RUNDIR/vpn-rotas" 2>/dev/null
     is_yes "$ENABLE_NAT" && ipt_remove nat POSTROUTING -o "$DEV" -j MASQUERADE
     if is_yes "$ENABLE_MSS_CLAMP"; then
         ipt_remove mangle FORWARD -o "$DEV" -p tcp --tcp-flags SYN,RST SYN \
