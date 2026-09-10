@@ -198,8 +198,41 @@ if true; then
     veredito=saudavel
     [ -n "$problemas" ] && veredito="$problemas"
 
-    printf 'MKVPN {"st":"%s","user":"%s","srv":"%s","gw":"%s","tun":"%s","veth":"%s","desde":"%s","expira":"%s","expira_se_ocioso":"%s","dpd":"%s","keepalive":"%s","mtu":"%s","transporte":"%s","rotas":%s,"ospf":%s,"ping":"%s","host":"%s","cfg":"%s","diag":"%s","ts":"%s"}
-'        "$estado" "$VPN_USER" "$VPN_SERVER" "$gw" "$tun_ip" "$veth_ip" "$desde" "$expira" "$ocioso" "$dpd" "$keepalive" "$mtu" "$transporte"         "$rotas" "$vizinhos" "${ping_estado:-}" "$(hostname)" "$CONFIG_PARAM"         "$(printf '%s' "$veredito" | tr '"' "'" | cut -c1-80)" "$(date -u +%FT%TZ)"
+    # Campos ja calculados, para o painel do celular nao precisar fazer conta.
+    # Um carimbo absoluto em UTC nao responde "falta muito?" para quem olha o
+    # telefone; segundos restantes respondem, e qualquer painel sabe formatar
+    # um numero.
+    agora_s=$(date -u +%s)
+    expira_em=""
+    if [ -n "$expira" ]; then
+        alvo=$(date -u -d "$expira" +%s 2>/dev/null)
+        if [ -n "$alvo" ]; then
+            expira_em=$(( alvo - agora_s ))
+            [ "$expira_em" -lt 0 ] && expira_em=0
+        fi
+    fi
+    conectado_ha=""
+    if [ -n "$desde" ]; then
+        inicio=$(date -u -d "$desde" +%s 2>/dev/null)
+        [ -n "$inicio" ] && conectado_ha=$(( agora_s - inicio ))
+    fi
+
+    # Situacao em uma palavra, que e o que cabe num indicador de painel:
+    #   ok       tunel de pe e nada a reclamar
+    #   atencao  de pe, mas com alguma verificacao falhando
+    #   falha    sem tunel
+    # Quem quiser o detalhe le o campo "diag"; quem so quer saber se pode
+    # confiar olha este.
+    situacao=falha
+    if [ "$estado" = conectado ]; then
+        situacao=ok
+        [ -n "$problemas" ] && situacao=atencao
+    elif [ "$estado" = dry-run ] || [ "$estado" = vpn-desativada ]; then
+        situacao=atencao
+    fi
+
+    printf 'MKVPN {"st":"%s","user":"%s","srv":"%s","gw":"%s","tun":"%s","veth":"%s","desde":"%s","expira":"%s","expira_se_ocioso":"%s","dpd":"%s","keepalive":"%s","mtu":"%s","transporte":"%s","expira_em_s":"%s","conectado_ha_s":"%s","situacao":"%s","rotas":%s,"ospf":%s,"ping":"%s","host":"%s","cfg":"%s","diag":"%s","ts":"%s"}
+'        "$estado" "$VPN_USER" "$VPN_SERVER" "$gw" "$tun_ip" "$veth_ip" "$desde" "$expira" "$ocioso" "$dpd" "$keepalive" "$mtu" "$transporte" "$expira_em" "$conectado_ha" "$situacao"         "$rotas" "$vizinhos" "${ping_estado:-}" "$(hostname)" "$CONFIG_PARAM"         "$(printf '%s' "$veredito" | tr '"' "'" | cut -c1-80)" "$(date -u +%FT%TZ)"
 fi
 
 # --- veredito --------------------------------------------------------------
