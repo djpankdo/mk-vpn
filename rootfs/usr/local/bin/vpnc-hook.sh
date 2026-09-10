@@ -226,7 +226,7 @@ post_disconnect() {
     log "tunel $DEV encerrado (reason=$reason); limpando regras"
     # Some com o estado: telemetria de tunel morto e pior que telemetria
     # ausente, porque parece boa.
-    rm -f "$RUNDIR/vpn-gw" "$RUNDIR/vpn-desde" "$RUNDIR/vpn-rotas" 2>/dev/null
+    rm -f "$RUNDIR/vpn-gw" "$RUNDIR/vpn-desde" "$RUNDIR/vpn-rotas"           "$RUNDIR/vpn-expira" "$RUNDIR/vpn-dpd" "$RUNDIR/vpn-keepalive"           "$RUNDIR/vpn-mtu" "$RUNDIR/vpn-transporte" 2>/dev/null
     is_yes "$ENABLE_NAT" && ipt_remove nat POSTROUTING -o "$DEV" -j MASQUERADE
     if is_yes "$ENABLE_MSS_CLAMP"; then
         ipt_remove mangle FORWARD -o "$DEV" -p tcp --tcp-flags SYN,RST SYN \

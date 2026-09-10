@@ -395,8 +395,15 @@ start_squid() {
     fi
 
     # -N: primeiro plano (nada de "service squid start", que depende do init).
-    # -d1: log no stderr, que vira o log do container no RouterOS.
-    supervise squid squid -N -d1 -f /etc/squid/squid.conf
+    #
+    # Sem "-d1" de proposito: o cache_log ja aponta para /dev/stdout, e o -d1
+    # manda a mesma mensagem tambem para o stderr -- o resultado era cada linha
+    # do Squid aparecendo DUAS vezes no log do RouterOS. Num buffer de 1000
+    # linhas compartilhado com o resto do roteador, o desligamento do Squid
+    # sozinho apagava o historico e levava junto a evidencia do motivo pelo qual
+    # a VPN tinha caido. A validacao previa com "squid -k parse" ja cobre o que
+    # o -d1 mostraria antes da configuracao ser lida.
+    supervise squid squid -N -f /etc/squid/squid.conf
 }
 
 # ---------------------------------------------------------------------------
@@ -661,6 +668,43 @@ build_openconnect_args() {
     OC_ARGS+=("$VPN_SERVER")
 }
 
+# Le a saida do openconnect, repassa tudo adiante e extrai os valores da sessao
+# para /run. Sao escritas pontuais, no momento da conexao, e nao um laco.
+capturar_sessao() {
+    local linha v
+    while IFS= read -r linha; do
+        printf '%s
+' "$linha"
+        case "$linha" in
+            *"Session authentication will expire at"*)
+                v="${linha#*expire at }"
+                # O openconnect imprime no fuso do container; guarda-se em UTC
+                # para a telemetria falar a mesma lingua do resto.
+                date -u -d "$v" +%FT%TZ > "$RUNDIR/vpn-expira" 2>/dev/null ||
+                    printf '%s' "$v" > "$RUNDIR/vpn-expira"
+                ;;
+            *"CSTP connected. DPD"*|*"DTLS initialised. DPD"*)
+                v="${linha#*DPD }"
+                printf '%s' "${v%%,*}" > "$RUNDIR/vpn-dpd"
+                v="${linha#*Keepalive }"
+                printf '%s' "${v%% *}" > "$RUNDIR/vpn-keepalive"
+                ;;
+            *"MTU after detection (was "*)
+                v="${linha#*(was }"
+                printf '%s' "${v%%)*}" > "$RUNDIR/vpn-mtu"
+                ;;
+            *"Detected MTU of "*)
+                v="${linha#*Detected MTU of }"
+                printf '%s' "${v%% *}" > "$RUNDIR/vpn-mtu"
+                ;;
+            *"Configured as "*", with "*)
+                v="${linha#*, with }"
+                printf '%s' "$v" > "$RUNDIR/vpn-transporte"
+                ;;
+        esac
+    done
+}
+
 run_vpn() {
     local rc
 
@@ -684,7 +728,21 @@ run_vpn() {
     fi
 
     log "--- conectando em $VPN_SERVER (tentativa unica) ---"
-    printf '%s\n' "$REAL_PASS" | openconnect "${OC_ARGS[@]}" &
+    # A saida do openconnect passa por um filtro antes de chegar ao log. Ele nao
+    # esconde nada -- reimprime cada linha -- mas guarda de passagem quatro
+    # valores que so existem ali e que ninguem mais tem como descobrir:
+    #
+    #   Session authentication will expire at <data>   prazo absoluto da sessao
+    #   CSTP connected. DPD 10, Keepalive 20           temporizadores negociados
+    #   No change in MTU after detection (was 1406)    MTU efetivo do tunel
+    #   Configured as 10.x.x.x, with SSL connected ... IP e transporte em uso
+    #
+    # O ">(...)" mantem o openconnect como ultimo comando do pipeline, entao o
+    # $! continua sendo o PID dele, e nao o do filtro. Isso importa: o
+    # desligamento gracioso manda SIGINT nesse PID, e apontar para o processo
+    # errado deixaria a VPN sendo cortada em vez de encerrada.
+    printf '%s
+' "$REAL_PASS" | openconnect "${OC_ARGS[@]}" > >(capturar_sessao) 2>&1 &
     OC_PID=$!
     wait "$OC_PID"
     rc=$?

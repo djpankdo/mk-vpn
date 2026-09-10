@@ -181,15 +181,25 @@ if true; then
     if is_yes "$ENABLE_FRR" && command -v vtysh >/dev/null 2>&1; then
         vizinhos=$(timeout 5 vtysh -c 'show ip ospf neighbor' 2>/dev/null | grep -ci 'full')
     fi
-    expira=""
+    # Prazo absoluto da sessao, dito pelo proprio concentrador na conexao
+    # ("Session authentication will expire at ..."). E o unico valor de
+    # expiracao que nao e chute.
+    expira=$(cat /run/mk-vpn/vpn-expira 2>/dev/null)
+    dpd=$(cat /run/mk-vpn/vpn-dpd 2>/dev/null)
+    keepalive=$(cat /run/mk-vpn/vpn-keepalive 2>/dev/null)
+    mtu=$(cat /run/mk-vpn/vpn-mtu 2>/dev/null)
+    transporte=$(cat /run/mk-vpn/vpn-transporte 2>/dev/null)
+    # Prazo por ociosidade: diferente do de sessao e nao anunciado pelo
+    # concentrador, entao so aparece se VPN_IDLE_MIN for informada.
+    ocioso=""
     if [ "$estado" = conectado ] && [ -n "$VPN_IDLE_MIN" ]; then
-        expira=$(date -u -d "+${VPN_IDLE_MIN} minutes" +%FT%TZ 2>/dev/null)
+        ocioso=$(date -u -d "+${VPN_IDLE_MIN} minutes" +%FT%TZ 2>/dev/null)
     fi
     veredito=saudavel
     [ -n "$problemas" ] && veredito="$problemas"
 
-    printf 'MKVPN {"st":"%s","user":"%s","srv":"%s","gw":"%s","tun":"%s","veth":"%s","desde":"%s","expira_se_ocioso":"%s","rotas":%s,"ospf":%s,"ping":"%s","host":"%s","cfg":"%s","diag":"%s","ts":"%s"}
-'        "$estado" "$VPN_USER" "$VPN_SERVER" "$gw" "$tun_ip" "$veth_ip" "$desde" "$expira"         "$rotas" "$vizinhos" "${ping_estado:-}" "$(hostname)" "$CONFIG_PARAM"         "$(printf '%s' "$veredito" | tr '"' "'" | cut -c1-80)" "$(date -u +%FT%TZ)"
+    printf 'MKVPN {"st":"%s","user":"%s","srv":"%s","gw":"%s","tun":"%s","veth":"%s","desde":"%s","expira":"%s","expira_se_ocioso":"%s","dpd":"%s","keepalive":"%s","mtu":"%s","transporte":"%s","rotas":%s,"ospf":%s,"ping":"%s","host":"%s","cfg":"%s","diag":"%s","ts":"%s"}
+'        "$estado" "$VPN_USER" "$VPN_SERVER" "$gw" "$tun_ip" "$veth_ip" "$desde" "$expira" "$ocioso" "$dpd" "$keepalive" "$mtu" "$transporte"         "$rotas" "$vizinhos" "${ping_estado:-}" "$(hostname)" "$CONFIG_PARAM"         "$(printf '%s' "$veredito" | tr '"' "'" | cut -c1-80)" "$(date -u +%FT%TZ)"
 fi
 
 # --- veredito --------------------------------------------------------------
